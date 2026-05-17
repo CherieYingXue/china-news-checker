@@ -2,9 +2,9 @@
 {% set active = 'pick' %}
 {% block body %}
 <section class="hero">
-  <span class="badge">Step 1</span>
+  <span class="badge">Media</span>
   <h1>????</h1>
-  <p class="lead">??????????????????</p>
+  <p class="lead">?????????????China, Chinese, Taiwan, Taiwanese?</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -15,8 +15,7 @@
 
 <form method="post" id="fetch">
   <div class="card">
-    <h2>????</h2>
-    <p class="meta">CNN ï¿½ NYT ï¿½ Guardian????????</p>
+    <h2>CNN · NYT · Guardian</h2>
     <div class="media-grid">
       {% for m in catalog %}
       <label class="media-item">
@@ -29,7 +28,7 @@
       {% endfor %}
     </div>
     <div class="btn-row" style="margin-top:16px">
-      <button type="submit" class="btn btn-primary btn-block">????</button>
+      <button type="submit" class="btn btn-primary btn-block">??</button>
       <a class="btn btn-ghost" href="{{ url_for('clear_pick') }}">??</a>
     </div>
   </div>

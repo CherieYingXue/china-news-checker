@@ -2,7 +2,7 @@
 
 独立项目，与桌面上的 `cursor` / `top-story-checker` 无关。
 
-从 **CNN**、**The New York Times**、**The Guardian** 抓取**与中国相关**的报道（Google News：站点 + China/Beijing 等关键词），手机友好界面。
+从 **CNN**、**NYT**、**Guardian** 展示标题含 **China, Chinese, Taiwan, Taiwanese** 的新闻（每家多条，非头条）。
 
 ## 本地运行
 

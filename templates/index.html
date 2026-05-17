@@ -2,9 +2,9 @@
 {% set active = 'home' %}
 {% block body %}
 <section class="hero">
-  <span class="badge">China focus</span>
+  <span class="badge">Keywords: {{ keywords }}</span>
   <h1>China News Checker</h1>
-  <p class="lead">从 CNN、NYT、Guardian 抓取<strong>与中国相关</strong>的报道（经 Google News 按站点+关键词筛选），手机随时查看。</p>
+  <p class="lead">展示 CNN、NYT、Guardian 网站上标题含 <strong>{{ keywords }}</strong> 的新闻（按关键词匹配，非整站头条）。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -14,19 +14,19 @@
 {% endwith %}
 
 <div class="card">
-  <h2>快捷操作</h2>
-  <p class="meta">定时任务默认 {{ schedule }}（服务器本地时间），将重复上次成功获取时的勾选。</p>
+  <h2>刷新</h2>
+  <p class="meta">定时任务 {{ schedule }} 将重复上次勾选的媒体。</p>
   <div class="btn-row">
     <a class="btn btn-ghost" href="{{ url_for('pick') }}">选择媒体</a>
     <form method="post" action="{{ url_for('fetch_now') }}" style="flex:1">
-      <button type="submit" class="btn btn-primary btn-block">获取头条</button>
+      <button type="submit" class="btn btn-primary btn-block">获取新闻</button>
     </form>
   </div>
 </div>
 
 {% if picked %}
 <div class="card">
-  <h2>当前已选（{{ picked|length }}）</h2>
+  <h2>当前媒体（{{ picked|length }}）</h2>
   <div class="media-grid">
     {% for m in picked %}
     <div class="media-item" style="cursor:default">
@@ -41,43 +41,30 @@
 {% endif %}
 
 <div class="card">
-  <h2>最新 · 中国相关报道</h2>
+  <h2>相关新闻</h2>
   {% if last_run %}
-  <p class="meta">更新时间：{{ last_run }}</p>
+  <p class="meta">更新：{{ last_run }}</p>
   {% endif %}
-  {% if rows %}
-  <div class="headline-list">
-    {% for r in rows %}
-    <article class="headline">
-      <div class="source">{{ r.media_name }} · {{ r.country }}</div>
-      <p class="title">
-        {% if r.link %}
-        <a href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
-        {% else %}
-        {{ r.title }}
-        {% endif %}
-      </p>
-      <div class="domain">{{ r.domain }}</div>
-    </article>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty">尚未获取中国相关报道。请先选择媒体，再点「获取头条」。</div>
-  {% endif %}
-</div>
-
-<div class="card">
-  <h2>媒体目录</h2>
-  <p class="meta">共 {{ catalog|length }} 家</p>
-  <div class="media-grid">
-    {% for m in catalog %}
-    <div class="media-item" style="cursor:default;opacity:.85">
-      <div class="media-body">
-        <div class="media-name"><span class="pill">{{ m.country }}</span>{{ m.name }}</div>
-        <div class="media-sub">{{ m.url }}</div>
-      </div>
+  {% if grouped %}
+    {% for g in grouped %}
+    <h3 style="margin:16px 0 10px;font-size:.95rem;color:#38bdf8">{{ g.name }}</h3>
+    <div class="headline-list">
+      {% for r in g.items %}
+      <article class="headline">
+        <p class="title">
+          {% if r.link %}
+          <a href="{{ r.link }}" target="_blank" rel="noopener">{{ r.title }}</a>
+          {% else %}
+          {{ r.title }}
+          {% endif %}
+        </p>
+        <div class="domain">{{ r.domain }}</div>
+      </article>
+      {% endfor %}
     </div>
     {% endfor %}
-  </div>
+  {% else %}
+  <div class="empty">暂无结果。请选择媒体后点「获取新闻」。</div>
+  {% endif %}
 </div>
 {% endblock %}

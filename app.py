@@ -6,7 +6,9 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -20,8 +22,10 @@ DB_PATH = BASE_DIR / "china_news.db"
 CATALOG_PATH = BASE_DIR / "media_catalog.json"
 APP_TITLE = "China News Checker"
 MAX_PICK = 10
+MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
 SETTINGS_LAST_KEYS = "last_picked_keys"
+KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 
 MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 "
@@ -29,25 +33,11 @@ MOBILE_UA = (
 )
 RSS_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
 
-# Google News 检索：仅各站与中国相关报道
-CHINA_RSS_QUERY = (
-    '(China OR Chinese OR Beijing OR Shanghai OR Taiwan OR "Hong Kong" '
-    'OR Xinjiang OR Tibet OR "Xi Jinping")'
-)
-CHINA_TITLE_KEYWORDS = (
-    "china",
-    "chinese",
-    "beijing",
-    "shanghai",
-    "taiwan",
-    "hong kong",
-    "xinjiang",
-    "tibet",
-    "xi jinping",
-    "ccp",
-    "prc",
-    "中国",
-    "中华",
+# 仅匹配这四个英文关键词（整词）
+CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese)"
+CHINA_TITLE_PATTERN = re.compile(
+    r"\b(china|chinese|taiwan|taiwanese)\b",
+    re.IGNORECASE,
 )
 
 app = Flask(__name__)
@@ -123,34 +113,37 @@ def rss_url(domain: str) -> str:
 
 
 def is_china_related(title: str) -> bool:
-    text = title.lower()
-    return any(k in text for k in CHINA_TITLE_KEYWORDS)
+    return bool(CHINA_TITLE_PATTERN.search(title))
 
 
-def fetch_headline(item: dict[str, Any]) -> dict[str, Any]:
+def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return all matching stories from this site (not just one headline)."""
     feed = feedparser.parse(
         rss_url(item["domain"]),
         agent=MOBILE_UA,
         request_headers=RSS_HEADERS,
     )
-    title = "No China-related story found"
-    link = ""
-    for entry in feed.entries[:20]:
-        candidate = (entry.get("title") or "").strip()
-        if not candidate:
-            continue
-        if is_china_related(candidate):
-            title = candidate
-            link = (entry.get("link") or "").strip()
-            break
-    return {
+    base = {
         "country": item.get("country", ""),
         "media_name": item.get("name", ""),
         "media_url": item.get("url", ""),
         "domain": item["domain"],
-        "title": title,
-        "link": link,
     }
+    rows: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for entry in feed.entries:
+        if len(rows) >= MAX_STORIES_PER_SITE:
+            break
+        title = (entry.get("title") or "").strip()
+        link = (entry.get("link") or "").strip()
+        if not title or not is_china_related(title):
+            continue
+        key = title.lower()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        rows.append({**base, "title": title, "link": link})
+    return rows
 
 
 def save_run(rows: list[dict[str, Any]]) -> None:
@@ -267,15 +260,21 @@ def home():
     conn = get_conn()
     last = conn.execute("SELECT run_at FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
+    rows = latest_headlines()
+    grouped: list[dict[str, Any]] = []
+    for name, items in groupby(rows, key=lambda r: r["media_name"]):
+        grouped.append({"name": name, "items": list(items)})
     return render_template(
         "index.html",
         title=APP_TITLE,
         catalog=catalog,
         picked=picked,
-        rows=latest_headlines(),
+        rows=rows,
+        grouped=grouped,
         last_run=last["run_at"] if last else None,
         schedule=schedule_time_label(),
         last_scheduled=last_scheduled_keys(catalog),
+        keywords=KEYWORDS_LABEL,
     )
 
 
@@ -289,7 +288,7 @@ def pick():
             flash("请至少选择一家媒体。", "error")
             return redirect(url_for("pick"))
         session[SESSION_KEYS] = keys[:MAX_PICK]
-        flash("已保存选择，可前往获取头条。", "success")
+        flash("已保存选择，返回首页刷新新闻。", "success")
         return redirect(url_for("home"))
     selected = set(session_keys())
     return render_template(
@@ -306,10 +305,12 @@ def fetch_now():
         flash("请先在「选择媒体」中勾选。", "error")
         return redirect(url_for("pick"))
     items = [by_key[k] for k in keys]
-    rows = [fetch_headline(i) for i in items]
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        rows.extend(fetch_china_stories(item))
     save_run(rows)
     save_last_keys(keys)
-    flash(f"已获取 {len(rows)} 条头条。", "success")
+    flash(f"已获取 {len(rows)} 条相关新闻。", "success")
     return redirect(url_for("home"))
 
 
@@ -327,7 +328,9 @@ def scheduled_job() -> None:
     if not keys:
         return
     items = [by_key[k] for k in keys]
-    rows = [fetch_headline(i) for i in items]
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        rows.extend(fetch_china_stories(item))
     save_run(rows)
 
 
