@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+china_news.db
+exports/*
+!exports/.gitkeep
+.env

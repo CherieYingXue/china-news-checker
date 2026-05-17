@@ -1,0 +1,11 @@
+{
+  "name": "China News Checker",
+  "short_name": "China News",
+  "description": "Fetch top headlines from CNN, NYT, and The Guardian",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "orientation": "portrait",
+  "icons": []
+}

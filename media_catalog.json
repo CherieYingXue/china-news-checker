@@ -1,0 +1,23 @@
+[
+  {
+    "country": "美国",
+    "name": "CNN",
+    "url": "https://www.cnn.com/",
+    "domain": "cnn.com",
+    "key": "https://www.cnn.com/"
+  },
+  {
+    "country": "美国",
+    "name": "The New York Times",
+    "url": "https://www.nytimes.com/",
+    "domain": "nytimes.com",
+    "key": "https://www.nytimes.com/"
+  },
+  {
+    "country": "英国",
+    "name": "The Guardian",
+    "url": "https://www.theguardian.com/",
+    "domain": "theguardian.com",
+    "key": "https://www.theguardian.com/"
+  }
+]

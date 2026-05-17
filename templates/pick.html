@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% set active = 'pick' %}
+{% block body %}
+<section class="hero">
+  <span class="badge">Step 1</span>
+  <h1>选择媒体</h1>
+  <p class="lead">勾选要查询头条的网站，然后返回首页获取�?/p>
+</section>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% for cat, msg in messages %}
+  <div class="flash {{ cat }}">{{ msg }}</div>
+  {% endfor %}
+{% endwith %}
+
+<form method="post" id="fetch">
+  <div class="card">
+    <h2>媒体列表</h2>
+    <p class="meta">最多同时选择 10 �?/p>
+    <div class="media-grid">
+      {% for m in catalog %}
+      <label class="media-item">
+        <input type="checkbox" name="media" value="{{ m.key }}" {% if m.key in selected %}checked{% endif %}>
+        <div class="media-body">
+          <div class="media-name"><span class="pill">{{ m.country }}</span>{{ m.name }}</div>
+          <div class="media-sub">{{ m.domain }}</div>
+        </div>
+      </label>
+      {% endfor %}
+    </div>
+    <div class="btn-row" style="margin-top:16px">
+      <button type="submit" class="btn btn-primary btn-block">保存选择</button>
+      <a class="btn btn-ghost" href="{{ url_for('clear_pick') }}">清空</a>
+    </div>
+  </div>
+</form>
+{% endblock %}

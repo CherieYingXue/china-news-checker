@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="China News Checker">
+  <title>{% block title %}{{ title }}{% endblock %}</title>
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="shell">
+    {% block body %}{% endblock %}
+  </div>
+  <nav class="bottom-nav" aria-label="主导航">
+    <div class="inner">
+      <a class="nav-link {% if active == 'home' %}active{% endif %}" href="{{ url_for('home') }}">
+        <span class="nav-icon">⌂</span>首页
+      </a>
+      <a class="nav-link {% if active == 'pick' %}active{% endif %}" href="{{ url_for('pick') }}">
+        <span class="nav-icon">☑</span>选择
+      </a>
+      <a class="nav-link" href="{{ url_for('pick') }}#fetch">
+        <span class="nav-icon">↻</span>获取
+      </a>
+    </div>
+  </nav>
+</body>
+</html>
