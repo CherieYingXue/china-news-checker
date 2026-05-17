@@ -2,9 +2,9 @@
 {% set active = 'home' %}
 {% block body %}
 <section class="hero">
-  <span class="badge">Headlines · Mobile</span>
+  <span class="badge">China focus</span>
   <h1>China News Checker</h1>
-  <p class="lead">勾�?CNN、NYT、Guardian，一键抓取各�?Google News 头条，适合手机随时查看�?/p>
+  <p class="lead">从 CNN、NYT、Guardian 抓取<strong>与中国相关</strong>的报道（经 Google News 按站点+关键词筛选），手机随时查看。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -15,7 +15,7 @@
 
 <div class="card">
   <h2>快捷操作</h2>
-  <p class="meta">定时任务默认 {{ schedule }}（服务器本地时间），将重复上次成功获取时的勾选�?/p>
+  <p class="meta">定时任务默认 {{ schedule }}（服务器本地时间），将重复上次成功获取时的勾选。</p>
   <div class="btn-row">
     <a class="btn btn-ghost" href="{{ url_for('pick') }}">选择媒体</a>
     <form method="post" action="{{ url_for('fetch_now') }}" style="flex:1">
@@ -26,7 +26,7 @@
 
 {% if picked %}
 <div class="card">
-  <h2>当前已选（{{ picked|length }}�?/h2>
+  <h2>当前已选（{{ picked|length }}）</h2>
   <div class="media-grid">
     {% for m in picked %}
     <div class="media-item" style="cursor:default">
@@ -41,7 +41,7 @@
 {% endif %}
 
 <div class="card">
-  <h2>最新头�?/h2>
+  <h2>最新 · 中国相关报道</h2>
   {% if last_run %}
   <p class="meta">更新时间：{{ last_run }}</p>
   {% endif %}
@@ -62,13 +62,13 @@
     {% endfor %}
   </div>
   {% else %}
-  <div class="empty">尚未获取头条。请先选择媒体，再点「获取头条」�?/div>
+  <div class="empty">尚未获取中国相关报道。请先选择媒体，再点「获取头条」。</div>
   {% endif %}
 </div>
 
 <div class="card">
   <h2>媒体目录</h2>
-  <p class="meta">�?{{ catalog|length }} �?/p>
+  <p class="meta">共 {{ catalog|length }} 家</p>
   <div class="media-grid">
     {% for m in catalog %}
     <div class="media-item" style="cursor:default;opacity:.85">
@@ -81,4 +81,3 @@
   </div>
 </div>
 {% endblock %}
-

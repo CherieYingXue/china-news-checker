@@ -2,7 +2,7 @@
 
 独立项目，与桌面上的 `cursor` / `top-story-checker` 无关。
 
-抓取 **CNN**、**The New York Times**、**The Guardian** 的 Google News 头条，手机友好界面，可部署到 Render。
+从 **CNN**、**The New York Times**、**The Guardian** 抓取**与中国相关**的报道（Google News：站点 + China/Beijing 等关键词），手机友好界面。
 
 ## 本地运行
 

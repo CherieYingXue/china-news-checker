@@ -9,6 +9,7 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import feedparser
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,6 +28,27 @@ MOBILE_UA = (
     "(KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
 )
 RSS_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
+
+# Google News 检索：仅各站与中国相关报道
+CHINA_RSS_QUERY = (
+    '(China OR Chinese OR Beijing OR Shanghai OR Taiwan OR "Hong Kong" '
+    'OR Xinjiang OR Tibet OR "Xi Jinping")'
+)
+CHINA_TITLE_KEYWORDS = (
+    "china",
+    "chinese",
+    "beijing",
+    "shanghai",
+    "taiwan",
+    "hong kong",
+    "xinjiang",
+    "tibet",
+    "xi jinping",
+    "ccp",
+    "prc",
+    "中国",
+    "中华",
+)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "china-news-checker-dev-key")
@@ -96,10 +118,13 @@ def setting_set(key: str, value: str) -> None:
 
 
 def rss_url(domain: str) -> str:
-    return (
-        "https://news.google.com/rss/search?q="
-        f"site:{domain}&hl=en-US&gl=US&ceid=US:en"
-    )
+    q = quote_plus(f"site:{domain} {CHINA_RSS_QUERY}")
+    return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+
+
+def is_china_related(title: str) -> bool:
+    text = title.lower()
+    return any(k in text for k in CHINA_TITLE_KEYWORDS)
 
 
 def fetch_headline(item: dict[str, Any]) -> dict[str, Any]:
@@ -108,13 +133,16 @@ def fetch_headline(item: dict[str, Any]) -> dict[str, Any]:
         agent=MOBILE_UA,
         request_headers=RSS_HEADERS,
     )
-    if feed.entries:
-        top = feed.entries[0]
-        title = top.get("title", "(No title)")
-        link = top.get("link", "")
-    else:
-        title = "No story found"
-        link = ""
+    title = "No China-related story found"
+    link = ""
+    for entry in feed.entries[:20]:
+        candidate = (entry.get("title") or "").strip()
+        if not candidate:
+            continue
+        if is_china_related(candidate):
+            title = candidate
+            link = (entry.get("link") or "").strip()
+            break
     return {
         "country": item.get("country", ""),
         "media_name": item.get("name", ""),
