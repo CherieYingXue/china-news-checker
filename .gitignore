@@ -5,3 +5,5 @@ china_news.db
 exports/*
 !exports/.gitkeep
 .env
+cloudflared.exe
+china_news.db
