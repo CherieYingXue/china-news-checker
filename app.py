@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -143,6 +144,19 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen_titles.add(key)
         rows.append({**base, "title": title, "link": link})
+    return rows
+
+
+def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not items:
+        return []
+    if len(items) == 1:
+        return fetch_china_stories(items[0])
+    rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(len(items), 4)) as pool:
+        futures = {pool.submit(fetch_china_stories, item): item for item in items}
+        for fut in as_completed(futures):
+            rows.extend(fut.result())
     return rows
 
 
@@ -305,9 +319,7 @@ def fetch_now():
         flash("请先在「选择媒体」中勾选。", "error")
         return redirect(url_for("pick"))
     items = [by_key[k] for k in keys]
-    rows: list[dict[str, Any]] = []
-    for item in items:
-        rows.extend(fetch_china_stories(item))
+    rows = fetch_all_stories(items)
     save_run(rows)
     save_last_keys(keys)
     flash(f"已获取 {len(rows)} 条相关新闻。", "success")
@@ -328,10 +340,7 @@ def scheduled_job() -> None:
     if not keys:
         return
     items = [by_key[k] for k in keys]
-    rows: list[dict[str, Any]] = []
-    for item in items:
-        rows.extend(fetch_china_stories(item))
-    save_run(rows)
+    save_run(fetch_all_stories(items))
 
 
 def start_scheduler() -> None:
