@@ -1,3 +1,4 @@
+# Auto-deploy from main branch
 services:
   - type: web
     name: china-news-checker
