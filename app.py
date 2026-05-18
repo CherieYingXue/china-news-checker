@@ -25,7 +25,8 @@ BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "china_news.db"
 CATALOG_PATH = BASE_DIR / "media_catalog.json"
 APP_TITLE = "China News Checker"
-MAX_PICK = 10
+MAX_PICK = 25
+CATEGORY_ORDER = ("美国媒体", "其他媒体")
 MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
 SETTINGS_LAST_KEYS = "last_picked_keys"
@@ -188,7 +189,7 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
         request_headers=RSS_HEADERS,
     )
     base = {
-        "country": item.get("country", ""),
+        "country": item.get("category", item.get("country", "")),
         "media_name": item.get("name", ""),
         "media_url": item.get("url", ""),
         "domain": item["domain"],
@@ -224,7 +225,7 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(items) == 1:
         return fetch_china_stories(items[0])
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(len(items), 5)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
         futures = {pool.submit(fetch_china_stories, item): item for item in items}
         for fut in as_completed(futures):
             rows.extend(fut.result())
@@ -321,6 +322,15 @@ def catalog_by_key(catalog: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(i["key"]): i for i in catalog}
 
 
+def catalog_groups(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for cat in CATEGORY_ORDER:
+        items = [m for m in catalog if m.get("category") == cat]
+        if items:
+            groups.append({"category": cat, "media": items})
+    return groups
+
+
 def session_keys() -> list[str]:
     raw = session.get(SESSION_KEYS)
     if not isinstance(raw, list):
@@ -394,6 +404,7 @@ def pick():
         "pick.html",
         title=APP_TITLE,
         catalog=catalog,
+        catalog_groups=catalog_groups(catalog),
         selected=selected,
         keywords=KEYWORDS_LABEL,
         time_window=TIME_WINDOW_LABEL,

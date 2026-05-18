@@ -9,9 +9,12 @@ sys.path.insert(0, str(ROOT))
 from app import app, load_catalog  # noqa: E402
 
 CATALOG = load_catalog()
-assert len(CATALOG) == 5
-assert any(m["domain"] == "washingtonpost.com" for m in CATALOG)
-assert any(m["domain"] == "bbc.com" for m in CATALOG)
+assert len(CATALOG) == 19
+us = [m for m in CATALOG if m["category"] == "美国媒体"]
+other = [m for m in CATALOG if m["category"] == "其他媒体"]
+assert len(us) == 12 and len(other) == 7
+assert any(m["domain"] == "foreignpolicy.com" for m in CATALOG)
+assert any(m["domain"] == "reuters.com" for m in CATALOG)
 KEYS = [CATALOG[0]["key"], CATALOG[1]["key"]]
 
 

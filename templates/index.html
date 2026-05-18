@@ -4,7 +4,7 @@
 <section class="hero">
   <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>China News Checker</h1>
-  <p class="lead">展示 CNN、NYT、Washington Post、Guardian、BBC 过去 <strong>24 小时</strong>内、标题含 <strong>{{ keywords }}</strong> 的新闻，并附中文翻译。</p>
+  <p class="lead">展示<strong>美国媒体</strong>与<strong>其他媒体</strong>过去 <strong>24 小时</strong>内、标题含 <strong>{{ keywords }}</strong> 的新闻，并附中文翻译。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -31,7 +31,7 @@
     {% for m in picked %}
     <div class="media-item" style="cursor:default">
       <div class="media-body">
-        <div class="media-name"><span class="pill">{{ m.country }}</span>{{ m.name }}</div>
+        <div class="media-name"><span class="pill">{{ m.category }}</span>{{ m.name }}</div>
         <div class="media-sub">{{ m.domain }}</div>
       </div>
     </div>

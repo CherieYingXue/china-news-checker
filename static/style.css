@@ -157,6 +157,18 @@ h1 {
   margin-bottom: 12px;
 }
 
+.media-group-title {
+  margin: 18px 0 10px;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #38bdf8;
+  letter-spacing: 0.02em;
+}
+
+.media-group-title:first-of-type {
+  margin-top: 4px;
+}
+
 .btn-sm {
   padding: 8px 12px;
   font-size: 0.82rem;

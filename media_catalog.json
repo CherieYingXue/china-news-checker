@@ -1,37 +1,21 @@
 [
-  {
-    "country": "美国",
-    "name": "CNN",
-    "url": "https://www.cnn.com/",
-    "domain": "cnn.com",
-    "key": "https://www.cnn.com/"
-  },
-  {
-    "country": "美国",
-    "name": "The New York Times",
-    "url": "https://www.nytimes.com/",
-    "domain": "nytimes.com",
-    "key": "https://www.nytimes.com/"
-  },
-  {
-    "country": "美国",
-    "name": "The Washington Post",
-    "url": "https://www.washingtonpost.com/",
-    "domain": "washingtonpost.com",
-    "key": "https://www.washingtonpost.com/"
-  },
-  {
-    "country": "英国",
-    "name": "The Guardian",
-    "url": "https://www.theguardian.com/",
-    "domain": "theguardian.com",
-    "key": "https://www.theguardian.com/"
-  },
-  {
-    "country": "英国",
-    "name": "BBC",
-    "url": "https://www.bbc.com/",
-    "domain": "bbc.com",
-    "key": "https://www.bbc.com/"
-  }
+  {"category": "美国媒体", "name": "CNN", "url": "https://www.cnn.com/", "domain": "cnn.com", "key": "https://www.cnn.com/"},
+  {"category": "美国媒体", "name": "The New York Times", "url": "https://www.nytimes.com/", "domain": "nytimes.com", "key": "https://www.nytimes.com/"},
+  {"category": "美国媒体", "name": "The Washington Post", "url": "https://www.washingtonpost.com/", "domain": "washingtonpost.com", "key": "https://www.washingtonpost.com/"},
+  {"category": "美国媒体", "name": "Foreign Policy", "url": "https://www.foreignpolicy.com/", "domain": "foreignpolicy.com", "key": "https://www.foreignpolicy.com/"},
+  {"category": "美国媒体", "name": "Associated Press", "url": "https://www.ap.org/", "domain": "ap.org", "key": "https://www.ap.org/"},
+  {"category": "美国媒体", "name": "Bloomberg", "url": "https://www.bloomberg.com/", "domain": "bloomberg.com", "key": "https://www.bloomberg.com/"},
+  {"category": "美国媒体", "name": "The Wall Street Journal", "url": "https://www.wsj.com/", "domain": "wsj.com", "key": "https://www.wsj.com/"},
+  {"category": "美国媒体", "name": "The Hill", "url": "https://www.thehill.com/", "domain": "thehill.com", "key": "https://www.thehill.com/"},
+  {"category": "美国媒体", "name": "Politico", "url": "https://www.politico.com/", "domain": "politico.com", "key": "https://www.politico.com/"},
+  {"category": "美国媒体", "name": "CNBC", "url": "https://www.cnbc.com/", "domain": "cnbc.com", "key": "https://www.cnbc.com/"},
+  {"category": "美国媒体", "name": "Fox News", "url": "https://www.foxnews.com/", "domain": "foxnews.com", "key": "https://www.foxnews.com/"},
+  {"category": "美国媒体", "name": "Axios", "url": "https://www.axios.com/", "domain": "axios.com", "key": "https://www.axios.com/"},
+  {"category": "其他媒体", "name": "BBC", "url": "https://www.bbc.com/", "domain": "bbc.com", "key": "https://www.bbc.com/"},
+  {"category": "其他媒体", "name": "The Guardian", "url": "https://www.theguardian.com/", "domain": "theguardian.com", "key": "https://www.theguardian.com/"},
+  {"category": "其他媒体", "name": "Reuters", "url": "https://www.reuters.com/", "domain": "reuters.com", "key": "https://www.reuters.com/"},
+  {"category": "其他媒体", "name": "Financial Times", "url": "https://www.ft.com/", "domain": "ft.com", "key": "https://www.ft.com/"},
+  {"category": "其他媒体", "name": "The Economist", "url": "https://www.economist.com/", "domain": "economist.com", "key": "https://www.economist.com/"},
+  {"category": "其他媒体", "name": "France 24", "url": "https://www.france24.com/en/", "domain": "france24.com", "key": "https://www.france24.com/en/"},
+  {"category": "其他媒体", "name": "Al Jazeera", "url": "https://www.aljazeera.com/", "domain": "aljazeera.com", "key": "https://www.aljazeera.com/"}
 ]

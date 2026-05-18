@@ -24,7 +24,13 @@ def main() -> None:
     pick = fetch("/pick")
     home = fetch("/")
     cbs = len(re.findall(r'type="checkbox"', pick))
-    ok = cbs >= 5 and "washingtonpost" in pick and "bbc.com" in pick
+    ok = (
+        cbs >= 19
+        and "美国媒体" in pick
+        and "其他媒体" in pick
+        and "foreignpolicy" in pick
+        and "reuters.com" in pick
+    )
     zh = "title-zh" in home or "中文翻译" in home
     print(f"checkboxes={cbs} wapo={'washingtonpost' in pick} bbc={'bbc.com' in pick} zh_ui={zh}")
     if ok and zh:
