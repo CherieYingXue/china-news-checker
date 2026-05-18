@@ -263,7 +263,7 @@ def home():
     rows = latest_headlines()
     grouped: list[dict[str, Any]] = []
     for name, items in groupby(rows, key=lambda r: r["media_name"]):
-        grouped.append({"name": name, "items": list(items)})
+        grouped.append({"name": name, "stories": list(items)})
     return render_template(
         "index.html",
         title=APP_TITLE,

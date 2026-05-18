@@ -46,10 +46,10 @@
   <p class="meta">更新：{{ last_run }}</p>
   {% endif %}
   {% if grouped %}
-    {% for g in grouped %}
-    <h3 style="margin:16px 0 10px;font-size:.95rem;color:#38bdf8">{{ g.name }}</h3>
+    {% for grp in grouped %}
+    <h3 style="margin:16px 0 10px;font-size:.95rem;color:#38bdf8">{{ grp.name }}</h3>
     <div class="headline-list">
-      {% for r in g.items %}
+      {% for r in grp.stories %}
       <article class="headline">
         <p class="title">
           {% if r.link %}
