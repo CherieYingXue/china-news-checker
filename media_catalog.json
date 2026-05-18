@@ -14,10 +14,24 @@
     "key": "https://www.nytimes.com/"
   },
   {
+    "country": "美国",
+    "name": "The Washington Post",
+    "url": "https://www.washingtonpost.com/",
+    "domain": "washingtonpost.com",
+    "key": "https://www.washingtonpost.com/"
+  },
+  {
     "country": "英国",
     "name": "The Guardian",
     "url": "https://www.theguardian.com/",
     "domain": "theguardian.com",
     "key": "https://www.theguardian.com/"
+  },
+  {
+    "country": "英国",
+    "name": "BBC",
+    "url": "https://www.bbc.com/",
+    "domain": "bbc.com",
+    "key": "https://www.bbc.com/"
   }
 ]

@@ -252,10 +252,19 @@ h1 {
 .headline .title {
   font-size: 0.95rem;
   line-height: 1.5;
-  margin: 0 0 8px;
+  margin: 0 0 6px;
 }
 
 .headline .title a { color: var(--text); }
+
+.headline .title-zh {
+  font-size: 0.88rem;
+  line-height: 1.55;
+  margin: 0 0 8px;
+  color: #cbd5e1;
+  padding-left: 10px;
+  border-left: 2px solid rgba(56, 189, 248, 0.45);
+}
 
 .headline .domain {
   font-size: 0.75rem;

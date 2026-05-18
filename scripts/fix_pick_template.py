@@ -8,7 +8,7 @@ lines = [
     '<section class="hero">',
     '  <span class="badge">{{ time_window }} \u00b7 {{ keywords }}</span>',
     "  <h1>\u9009\u62e9\u5a92\u4f53</h1>",
-    "  <p class=\"lead\">\u52fe\u9009 CNN\u3001NYT\u3001Guardian\uff0c\u6293\u53d6\u8fc7\u53bb 24 \u5c0f\u65f6\u5185\u6807\u9898\u542b {{ keywords }} \u7684\u65b0\u95fb\u3002</p>",
+    "  <p class=\"lead\">\u52fe\u9009\u5a92\u4f53\uff08\u53ef\u591a\u9009\uff09\uff0c\u6293\u53d6\u8fc7\u53bb 24 \u5c0f\u65f6\u5185\u4e2d\u56fd\u76f8\u5173\u65b0\u95fb\u5e76\u663e\u793a\u4e2d\u6587\u7ffb\u8bd1\u3002</p>",
     "</section>",
     "",
     "{% with messages = get_flashed_messages(with_categories=true) %}",
@@ -18,9 +18,9 @@ lines = [
     "{% endwith %}",
     "",
     '<form method="post" id="fetch">',
-    '  <div class="card">',
+    '  <motion class="card">',
     '    <div class="pick-toolbar">',
-    "      <h2>CNN \u00b7 NYT \u00b7 Guardian</h2>",
+    "      <h2>5 \u5bb6\u5a92\u4f53</h2>",
     '      <p class="pick-count" id="pick-count">\u5df2\u9009 0 / {{ catalog|length }}</p>',
     "    </div>",
     '    <div class="pick-actions">',
@@ -34,7 +34,7 @@ lines = [
     '        <span class="check-ui" aria-hidden="true"></span>',
     '        <div class="media-body">',
     '          <div class="media-name"><span class="pill">{{ m.country }}</span>{{ m.name }}</div>',
-    '          <div class="media-sub">{{ m.domain }}</div>',
+    '          <div class="media-sub">{{ m.domain }}</motion>',
     "        </div>",
     "      </label>",
     "      {% endfor %}",
@@ -67,7 +67,7 @@ lines = [
     "</script>",
     "{% endblock %}",
 ]
-text = "\n".join(lines)
+text = "\n".join(lines).replace("<motion", "<div").replace("</motion>", "</div>")
 Path(__file__).resolve().parent.parent.joinpath("templates", "pick.html").write_text(
     text, encoding="utf-8"
 )

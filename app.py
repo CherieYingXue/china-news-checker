@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from pathlib import Path
@@ -17,6 +18,7 @@ from urllib.parse import quote_plus
 
 import feedparser
 from apscheduler.schedulers.background import BackgroundScheduler
+from deep_translator import GoogleTranslator
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 BASE_DIR = Path(__file__).parent
@@ -82,6 +84,16 @@ def init_db() -> None:
     )
     conn.commit()
     conn.close()
+    migrate_db()
+
+
+def migrate_db() -> None:
+    conn = get_conn()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(headlines)").fetchall()}
+    if "title_zh" not in cols:
+        conn.execute("ALTER TABLE headlines ADD COLUMN title_zh TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    conn.close()
 
 
 def load_catalog() -> list[dict[str, Any]]:
@@ -130,6 +142,35 @@ def entry_published_at(entry: Any) -> dt.datetime | None:
     return None
 
 
+def translate_title(title: str, *, retries: int = 3) -> str:
+    text = title.strip()
+    if not text:
+        return ""
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return GoogleTranslator(source="auto", target="zh-CN").translate(text)
+        except Exception as e:
+            last_err = e
+            time.sleep(0.4 * (attempt + 1))
+    return f"（翻译暂不可用：{text[:80]}）" if last_err else ""
+
+
+def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return rows
+
+    def translate_row(row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        out["title_zh"] = translate_title(out.get("title", ""))
+        return out
+
+    if len(rows) == 1:
+        return [translate_row(rows[0])]
+    with ThreadPoolExecutor(max_workers=min(len(rows), 3)) as pool:
+        return list(pool.map(translate_row, rows))
+
+
 def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
     published = entry_published_at(entry)
     if published is None:
@@ -174,7 +215,7 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "published_at": published.isoformat(timespec="minutes") if published else "",
             }
         )
-    return rows
+    return add_translations(rows)
 
 
 def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -183,7 +224,7 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(items) == 1:
         return fetch_china_stories(items[0])
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(len(items), 4)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(items), 5)) as pool:
         futures = {pool.submit(fetch_china_stories, item): item for item in items}
         for fut in as_completed(futures):
             rows.extend(fut.result())
@@ -197,8 +238,8 @@ def save_run(rows: list[dict[str, Any]]) -> None:
         conn.execute(
             """
             INSERT INTO headlines (
-                fetched_at, country, media_name, media_url, domain, title, link
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                fetched_at, country, media_name, media_url, domain, title, title_zh, link
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now,
@@ -207,6 +248,7 @@ def save_run(rows: list[dict[str, Any]]) -> None:
                 r["media_url"],
                 r["domain"],
                 r["title"],
+                r.get("title_zh", ""),
                 r["link"],
             ),
         )
@@ -224,7 +266,7 @@ def latest_headlines() -> list[sqlite3.Row]:
         return []
     rows = conn.execute(
         """
-        SELECT fetched_at, country, media_name, media_url, domain, title, link
+        SELECT fetched_at, country, media_name, media_url, domain, title, title_zh, link
         FROM headlines WHERE fetched_at = ? ORDER BY media_name
         """,
         (run["run_at"],),
@@ -247,9 +289,20 @@ def export_csv(run_at: str) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(
-            ["fetched_at", "country", "media_name", "media_url", "domain", "title", "link"]
+            [
+                "fetched_at",
+                "country",
+                "media_name",
+                "media_url",
+                "domain",
+                "title",
+                "title_zh",
+                "link",
+            ]
         )
         for r in rows:
+            keys = r.keys() if hasattr(r, "keys") else ()
+            title_zh = r["title_zh"] if "title_zh" in keys else ""
             w.writerow(
                 [
                     r["fetched_at"],
@@ -258,6 +311,7 @@ def export_csv(run_at: str) -> None:
                     r["media_url"],
                     r["domain"],
                     r["title"],
+                    title_zh,
                     r["link"],
                 ]
             )

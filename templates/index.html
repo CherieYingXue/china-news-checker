@@ -4,7 +4,7 @@
 <section class="hero">
   <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>China News Checker</h1>
-  <p class="lead">展示 CNN、NYT、Guardian 过去 <strong>24 小时</strong>内、标题含 <strong>{{ keywords }}</strong> 的新闻。</p>
+  <p class="lead">展示 CNN、NYT、Washington Post、Guardian、BBC 过去 <strong>24 小时</strong>内、标题含 <strong>{{ keywords }}</strong> 的新闻，并附中文翻译。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -58,6 +58,9 @@
           {{ r.title }}
           {% endif %}
         </p>
+        {% if r.title_zh %}
+        <p class="title-zh">{{ r.title_zh }}</p>
+        {% endif %}
         <div class="domain">{{ r.domain }}</div>
       </article>
       {% endfor %}

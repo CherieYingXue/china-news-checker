@@ -4,7 +4,7 @@
 <section class="hero">
   <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>选择媒体</h1>
-  <p class="lead">勾选 CNN、NYT、Guardian，抓取过去 24 小时内标题含 {{ keywords }} 的新闻。</p>
+  <p class="lead">勾选媒体（可多选），抓取过去 24 小时内中国相关新闻并显示中文翻译。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -16,7 +16,7 @@
 <form method="post" id="fetch">
   <div class="card">
     <div class="pick-toolbar">
-      <h2>CNN · NYT · Guardian</h2>
+      <h2>5 家媒体</h2>
       <p class="pick-count" id="pick-count">已选 0 / {{ catalog|length }}</p>
     </div>
     <div class="pick-actions">

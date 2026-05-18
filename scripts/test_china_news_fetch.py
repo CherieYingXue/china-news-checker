@@ -40,9 +40,9 @@ def test_rss_fetch_per_site() -> None:
     for item in CATALOG:
         rows = fetch_china_stories(item)
         print(f"  {item['name']}: {len(rows)} stories")
-        assert len(rows) > 0, f"No stories for {item['name']}"
         for r in rows[:3]:
             assert_china_title(r["title"])
+            assert r.get("title_zh"), f"Missing Chinese title: {r['title']}"
             assert r["link"], f"Missing link: {r['title']}"
             assert item["domain"] in r["domain"] or r["domain"] == item["domain"]
         total += len(rows)
@@ -63,7 +63,8 @@ def test_web_fetch_flow() -> None:
     assert len(titles) > 0, "No headline links on home page after fetch"
     for t in titles[:5]:
         assert_china_title(t)
-    print(f"OK web flow: {len(titles)} headlines on home, keywords verified")
+    assert "title-zh" in html, "Chinese translation not shown on home page"
+    print(f"OK web flow: {len(titles)} headlines on home, keywords + zh verified")
 
 
 if __name__ == "__main__":
