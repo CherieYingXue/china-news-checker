@@ -2,9 +2,9 @@
 {% set active = 'pick' %}
 {% block body %}
 <section class="hero">
-  <span class="badge">Media</span>
+  <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>选择媒体</h1>
-  <p class="lead">勾选要抓取的网站（可多选），保存后回首页点「获取新闻」。关键词：China, Chinese, Taiwan, Taiwanese。</p>
+  <p class="lead">勾选 CNN、NYT、Guardian，抓取过去 24 小时内标题含 {{ keywords }} 的新闻。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -26,13 +26,7 @@
     <div class="media-grid" role="group" aria-label="媒体列表">
       {% for m in catalog %}
       <label class="media-item media-check">
-        <input
-          type="checkbox"
-          class="media-cb"
-          name="media"
-          value="{{ m.key }}"
-          {% if m.key in selected %}checked{% endif %}
-        >
+        <input type="checkbox" class="media-cb" name="media" value="{{ m.key }}" {% if m.key in selected %}checked{% endif %}>
         <span class="check-ui" aria-hidden="true"></span>
         <div class="media-body">
           <div class="media-name"><span class="pill">{{ m.country }}</span>{{ m.name }}</div>
@@ -55,18 +49,14 @@
   function updateCount() {
     var n = 0;
     boxes.forEach(function (b) { if (b.checked) n += 1; });
-    countEl.textContent = '已选 ' + n + ' / ' + boxes.length;
+    countEl.textContent = '\u5df2\u9009 ' + n + ' / ' + boxes.length;
   }
-  boxes.forEach(function (b) {
-    b.addEventListener('change', updateCount);
-  });
+  boxes.forEach(function (b) { b.addEventListener('change', updateCount); });
   document.getElementById('btn-all').addEventListener('click', function () {
-    boxes.forEach(function (b) { b.checked = true; });
-    updateCount();
+    boxes.forEach(function (b) { b.checked = true; }); updateCount();
   });
   document.getElementById('btn-none').addEventListener('click', function () {
-    boxes.forEach(function (b) { b.checked = false; });
-    updateCount();
+    boxes.forEach(function (b) { b.checked = false; }); updateCount();
   });
   updateCount();
 })();

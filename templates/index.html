@@ -2,9 +2,9 @@
 {% set active = 'home' %}
 {% block body %}
 <section class="hero">
-  <span class="badge">Keywords: {{ keywords }}</span>
+  <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>China News Checker</h1>
-  <p class="lead">展示 CNN、NYT、Guardian 网站上标题含 <strong>{{ keywords }}</strong> 的新闻（按关键词匹配，非整站头条）。</p>
+  <p class="lead">展示 CNN、NYT、Guardian 过去 <strong>24 小时</strong>内、标题含 <strong>{{ keywords }}</strong> 的新闻。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
@@ -64,7 +64,7 @@
     </div>
     {% endfor %}
   {% else %}
-  <div class="empty">暂无结果。请选择媒体后点「获取新闻」。</div>
+  <div class="empty">暂无过去 24 小时内的结果。请选择媒体后点「获取新闻」。</div>
   {% endif %}
 </div>
 {% endblock %}

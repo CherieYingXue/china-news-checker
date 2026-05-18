@@ -8,11 +8,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import (  # noqa: E402
+    CHINA_RSS_QUERY,
     CHINA_TITLE_PATTERN,
+    TIME_WINDOW_HOURS,
     app,
     fetch_china_stories,
     is_china_related,
     load_catalog,
+    rss_url,
+    within_time_window,
 )
 
 CATALOG = load_catalog()
@@ -21,6 +25,14 @@ ALL_KEYS = [m["key"] for m in CATALOG]
 
 def assert_china_title(title: str) -> None:
     assert is_china_related(title), f"Title missing keyword: {title!r}"
+
+
+def test_24h_query_config() -> None:
+    assert "when:1d" in CHINA_RSS_QUERY
+    assert TIME_WINDOW_HOURS == 24
+    url = rss_url("cnn.com")
+    assert "when%3A1d" in url or "when:1d" in url
+    print("OK 24h RSS query config")
 
 
 def test_rss_fetch_per_site() -> None:
@@ -55,6 +67,8 @@ def test_web_fetch_flow() -> None:
 
 
 if __name__ == "__main__":
+    print("=== 24h config ===")
+    test_24h_query_config()
     print("=== RSS fetch test ===")
     test_rss_fetch_per_site()
     print("=== Web fetch test ===")

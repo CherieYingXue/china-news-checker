@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import csv
 import datetime as dt
 import json
@@ -27,6 +28,8 @@ MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
 SETTINGS_LAST_KEYS = "last_picked_keys"
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
+TIME_WINDOW_HOURS = 24
+TIME_WINDOW_LABEL = "past 24 hours"
 
 MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 "
@@ -34,8 +37,8 @@ MOBILE_UA = (
 )
 RSS_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
 
-# 仅匹配这四个英文关键词（整词）
-CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese)"
+# 关键词 + Google News 时间范围 when:1d = 过去 24 小时
+CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese) when:1d"
 CHINA_TITLE_PATTERN = re.compile(
     r"\b(china|chinese|taiwan|taiwanese)\b",
     re.IGNORECASE,
@@ -117,6 +120,25 @@ def is_china_related(title: str) -> bool:
     return bool(CHINA_TITLE_PATTERN.search(title))
 
 
+def entry_published_at(entry: Any) -> dt.datetime | None:
+    for key in ("published_parsed", "updated_parsed", "created_parsed"):
+        parsed = entry.get(key)
+        if parsed:
+            return dt.datetime.fromtimestamp(
+                calendar.timegm(parsed), tz=dt.timezone.utc
+            )
+    return None
+
+
+def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
+    published = entry_published_at(entry)
+    if published is None:
+        return True
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cutoff = now - dt.timedelta(hours=TIME_WINDOW_HOURS)
+    return published >= cutoff
+
+
 def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Return all matching stories from this site (not just one headline)."""
     feed = feedparser.parse(
@@ -137,13 +159,21 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
             break
         title = (entry.get("title") or "").strip()
         link = (entry.get("link") or "").strip()
-        if not title or not is_china_related(title):
+        if not title or not is_china_related(title) or not within_time_window(entry):
             continue
         key = title.lower()
         if key in seen_titles:
             continue
         seen_titles.add(key)
-        rows.append({**base, "title": title, "link": link})
+        published = entry_published_at(entry)
+        rows.append(
+            {
+                **base,
+                "title": title,
+                "link": link,
+                "published_at": published.isoformat(timespec="minutes") if published else "",
+            }
+        )
     return rows
 
 
@@ -289,6 +319,7 @@ def home():
         schedule=schedule_time_label(),
         last_scheduled=last_scheduled_keys(catalog),
         keywords=KEYWORDS_LABEL,
+        time_window=TIME_WINDOW_LABEL,
     )
 
 
@@ -306,7 +337,12 @@ def pick():
         return redirect(url_for("home"))
     selected = set(session_keys())
     return render_template(
-        "pick.html", title=APP_TITLE, catalog=catalog, selected=selected
+        "pick.html",
+        title=APP_TITLE,
+        catalog=catalog,
+        selected=selected,
+        keywords=KEYWORDS_LABEL,
+        time_window=TIME_WINDOW_LABEL,
     )
 
 
@@ -322,7 +358,7 @@ def fetch_now():
     rows = fetch_all_stories(items)
     save_run(rows)
     save_last_keys(keys)
-    flash(f"已获取 {len(rows)} 条相关新闻。", "success")
+    flash(f"已获取过去 24 小时内 {len(rows)} 条相关新闻。", "success")
     return redirect(url_for("home"))
 
 
