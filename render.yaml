@@ -1,7 +1,9 @@
 services:
   - type: web
     name: china-news-checker
-    env: python
+    runtime: python
+    repo: https://github.com/CherieYingXue/china-news-checker
+    branch: main
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 120 app:app
