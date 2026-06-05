@@ -23,11 +23,11 @@ def test_bing_fallback_when_google_empty() -> None:
     try:
         item = next(m for m in load_catalog() if m["domain"] == "cnn.com")
         rows = fetch_china_stories(item)
-        assert rows, "Bing fallback should return stories when Google RSS is empty"
+        assert rows, "Search fallback should return stories when Google RSS is empty"
         for row in rows:
             assert is_china_related(row["title"]), row["title"]
             assert row["link"].startswith("http")
-        print(f"OK Bing fallback: {len(rows)} stories for {item['name']}")
+        print(f"OK search fallback: {len(rows)} stories for {item['name']}")
     finally:
         app_module._fetch_feed = original
 

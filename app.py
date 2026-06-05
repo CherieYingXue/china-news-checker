@@ -40,6 +40,10 @@ MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
 )
+DESKTOP_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+)
 RSS_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
@@ -150,30 +154,28 @@ def _fetch_feed(url: str) -> feedparser.FeedParserDict:
         return feedparser.parse("")
 
 
-def _bing_news_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[dict[str, str]]:
-    """Fallback when Google News RSS is empty (common on datacenter IPs)."""
-    q = quote_plus(f"site:{domain} {BING_NEWS_QUERY}")
-    url = (
-        "https://www.bing.com/news/search?q="
-        + q
-        + "&setlang=en-US&mkt=en-US&form=QBNT"
-    )
-    headers = {"User-Agent": MOBILE_UA, **RSS_HEADERS}
-    try:
-        resp = requests.get(url, headers=headers, timeout=28)
-        resp.raise_for_status()
-    except Exception:
-        return []
+def _domain_in_url(domain: str, url: str) -> bool:
+    host = url.lower().split("/")[2] if "://" in url else url.lower()
+    host = host.split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    return domain in host or host.endswith("." + domain) or host == domain
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+
+def _links_from_html(
+    html: str, domain: str, *, limit: int = MAX_STORIES_PER_SITE
+) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         title = re.sub(r"\s+", " ", (a.get_text(" ", strip=True) or "")).strip()
-        if not href.startswith("http") or domain not in href:
+        if not href.startswith("http") or not _domain_in_url(domain, href):
             continue
-        if "bing.com" in href or len(title) < 18:
+        if any(x in href for x in ("bing.com", "google.com", "duckduckgo.com")):
+            continue
+        if len(title) < 18:
             continue
         key = title.lower()
         if key in seen:
@@ -183,6 +185,75 @@ def _bing_news_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> lis
         if len(out) >= limit:
             break
     return out
+
+
+def _bing_news_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[dict[str, str]]:
+    """Fallback when Google News RSS is empty (common on datacenter IPs)."""
+    q = quote_plus(f"site:{domain} {BING_NEWS_QUERY}")
+    url = (
+        "https://www.bing.com/news/search?q="
+        + q
+        + "&setlang=en-US&mkt=en-US&form=QBNT"
+    )
+    headers = {
+        "User-Agent": DESKTOP_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=28)
+        resp.raise_for_status()
+    except Exception:
+        return []
+    return _links_from_html(resp.text, domain, limit=limit)
+
+
+def _duckduckgo_news_entries(
+    domain: str, *, limit: int = MAX_STORIES_PER_SITE
+) -> list[dict[str, str]]:
+    """Second fallback — DuckDuckGo lite often works when Google/Bing block cloud IPs."""
+    query = f"site:{domain} {BING_NEWS_QUERY}"
+    headers = {
+        "User-Agent": DESKTOP_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        resp = requests.post(
+            "https://lite.duckduckgo.com/lite/",
+            data={"q": query},
+            headers=headers,
+            timeout=28,
+        )
+        resp.raise_for_status()
+    except Exception:
+        return []
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for a in soup.select("a.result-link"):
+        href = (a.get("href") or "").strip()
+        title = re.sub(r"\s+", " ", (a.get_text(" ", strip=True) or "")).strip()
+        if not href.startswith("http") or not _domain_in_url(domain, href):
+            continue
+        if len(title) < 18:
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title, "link": href})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _search_fallback_entries(domain: str) -> list[dict[str, str]]:
+    for fetcher in (_bing_news_entries, _duckduckgo_news_entries):
+        rows = fetcher(domain, limit=MAX_STORIES_PER_SITE)
+        if rows:
+            return rows
+    return []
 
 
 def is_china_related(title: str) -> bool:
@@ -243,7 +314,7 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
     feed = _fetch_feed(rss_url(domain))
     entries: list[Any] = list(feed.entries)
     if not entries:
-        entries = _bing_news_entries(domain, limit=MAX_STORIES_PER_SITE)
+        entries = _search_fallback_entries(domain)
     base = {
         "country": item.get("category", item.get("country", "")),
         "media_name": item.get("name", ""),
