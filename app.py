@@ -17,7 +17,9 @@ from typing import Any
 from urllib.parse import quote_plus
 
 import feedparser
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
+from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
@@ -38,7 +40,12 @@ MOBILE_UA = (
     "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
 )
-RSS_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
+RSS_HEADERS = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Referer": "https://news.google.com/",
+}
+BING_NEWS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese)"
 
 # 关键词 + Google News 时间范围 when:1d = 过去 24 小时
 CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese) when:1d"
@@ -129,6 +136,55 @@ def rss_url(domain: str) -> str:
     return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
 
 
+def _fetch_feed(url: str) -> feedparser.FeedParserDict:
+    """Fetch RSS via requests (feedparser's own HTTP is flaky on cloud hosts)."""
+    headers = {"User-Agent": MOBILE_UA, **RSS_HEADERS}
+    try:
+        resp = requests.get(url, headers=headers, timeout=28)
+        resp.raise_for_status()
+        body = resp.content
+        if len(body) < 300 or b"<item" not in body.lower():
+            return feedparser.parse("")
+        return feedparser.parse(body)
+    except Exception:
+        return feedparser.parse("")
+
+
+def _bing_news_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[dict[str, str]]:
+    """Fallback when Google News RSS is empty (common on datacenter IPs)."""
+    q = quote_plus(f"site:{domain} {BING_NEWS_QUERY}")
+    url = (
+        "https://www.bing.com/news/search?q="
+        + q
+        + "&setlang=en-US&mkt=en-US&form=QBNT"
+    )
+    headers = {"User-Agent": MOBILE_UA, **RSS_HEADERS}
+    try:
+        resp = requests.get(url, headers=headers, timeout=28)
+        resp.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        title = re.sub(r"\s+", " ", (a.get_text(" ", strip=True) or "")).strip()
+        if not href.startswith("http") or domain not in href:
+            continue
+        if "bing.com" in href or len(title) < 18:
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title, "link": href})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def is_china_related(title: str) -> bool:
     return bool(CHINA_TITLE_PATTERN.search(title))
 
@@ -183,20 +239,20 @@ def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
 
 def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Return all matching stories from this site (not just one headline)."""
-    feed = feedparser.parse(
-        rss_url(item["domain"]),
-        agent=MOBILE_UA,
-        request_headers=RSS_HEADERS,
-    )
+    domain = item["domain"]
+    feed = _fetch_feed(rss_url(domain))
+    entries: list[Any] = list(feed.entries)
+    if not entries:
+        entries = _bing_news_entries(domain, limit=MAX_STORIES_PER_SITE)
     base = {
         "country": item.get("category", item.get("country", "")),
         "media_name": item.get("name", ""),
         "media_url": item.get("url", ""),
-        "domain": item["domain"],
+        "domain": domain,
     }
     rows: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
-    for entry in feed.entries:
+    for entry in entries:
         if len(rows) >= MAX_STORIES_PER_SITE:
             break
         title = (entry.get("title") or "").strip()
