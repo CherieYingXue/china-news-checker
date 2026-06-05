@@ -21,7 +21,7 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from deep_translator import GoogleTranslator
-from flask import Flask, flash, redirect, render_template, request, session, url_for
+from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "china_news.db"
@@ -50,6 +50,37 @@ RSS_HEADERS = {
     "Referer": "https://news.google.com/",
 }
 BING_NEWS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese)"
+
+# Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
+NATIVE_RSS_FEEDS: dict[str, list[str]] = {
+    "cnn.com": ["http://rss.cnn.com/rss/edition_world.rss"],
+    "nytimes.com": [
+        "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+        "https://rss.nytimes.com/services/xml/rss/nyt/AsiaPacific.xml",
+    ],
+    "washingtonpost.com": ["https://feeds.washingtonpost.com/rss/world"],
+    "foreignpolicy.com": ["https://foreignpolicy.com/feed/"],
+    "apnews.com": ["https://apnews.com/apf-topnews"],
+    "bloomberg.com": [
+        "https://feeds.bloomberg.com/markets/news.rss",
+        "https://feeds.bloomberg.com/politics/news.rss",
+    ],
+    "wsj.com": ["https://feeds.a.dj.com/rss/RSSWorldNews.xml"],
+    "thehill.com": ["https://thehill.com/feed/"],
+    "politico.com": ["https://rss.politico.com/politics-news.xml"],
+    "cnbc.com": [
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100727362"
+    ],
+    "foxnews.com": ["https://moxie.foxnews.com/google-publisher/world.xml"],
+    "axios.com": ["https://api.axios.com/feed/"],
+    "bbc.com": ["http://feeds.bbci.co.uk/news/world/asia/rss.xml"],
+    "theguardian.com": ["https://www.theguardian.com/world/china/rss"],
+    "reuters.com": ["https://www.reuters.com/world/china/rss/"],
+    "ft.com": ["https://www.ft.com/world/asia-pacific/china?format=rss"],
+    "economist.com": ["https://www.economist.com/china/rss.xml"],
+    "france24.com": ["https://www.france24.com/en/asia-pacific/rss"],
+    "aljazeera.com": ["https://www.aljazeera.com/xml/rss/all.xml"],
+}
 
 # 关键词 + Google News 时间范围 when:1d = 过去 24 小时
 CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese) when:1d"
@@ -256,6 +287,29 @@ def _search_fallback_entries(domain: str) -> list[dict[str, str]]:
     return []
 
 
+def _native_rss_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[Any]:
+    """Publisher RSS filtered for China-related titles (works on cloud hosts)."""
+    feed_urls = NATIVE_RSS_FEEDS.get(domain, [])
+    collected: list[Any] = []
+    seen_titles: set[str] = set()
+    for feed_url in feed_urls:
+        feed = _fetch_feed(feed_url)
+        for entry in feed.entries:
+            title = (entry.get("title") or "").strip()
+            if not title or not is_china_related(title):
+                continue
+            if not within_time_window(entry):
+                continue
+            key = title.lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            collected.append(entry)
+            if len(collected) >= limit:
+                return collected
+    return collected
+
+
 def is_china_related(title: str) -> bool:
     return bool(CHINA_TITLE_PATTERN.search(title))
 
@@ -313,6 +367,8 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
     domain = item["domain"]
     feed = _fetch_feed(rss_url(domain))
     entries: list[Any] = list(feed.entries)
+    if not entries:
+        entries = _native_rss_entries(domain)
     if not entries:
         entries = _search_fallback_entries(domain)
     base = {
@@ -486,6 +542,17 @@ def schedule_time_label() -> str:
     h = os.getenv("DAILY_RUN_HOUR", "8")
     m = os.getenv("DAILY_RUN_MINUTE", "0").zfill(2)
     return f"{h}:{m}"
+
+
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "status": "ok",
+            "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
+            "sources": ["google-rss", "native-rss", "bing", "duckduckgo"],
+        }
+    )
 
 
 @app.route("/")
