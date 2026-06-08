@@ -49,7 +49,7 @@ RSS_HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
     "Referer": "https://news.google.com/",
 }
-BING_NEWS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese)"
+BING_NEWS_QUERY = "China when:1d"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -60,7 +60,6 @@ NATIVE_RSS_FEEDS: dict[str, list[str]] = {
     ],
     "washingtonpost.com": ["https://feeds.washingtonpost.com/rss/world"],
     "foreignpolicy.com": ["https://foreignpolicy.com/feed/"],
-    "apnews.com": ["https://apnews.com/apf-topnews"],
     "bloomberg.com": [
         "https://feeds.bloomberg.com/markets/news.rss",
         "https://feeds.bloomberg.com/politics/news.rss",
@@ -75,15 +74,14 @@ NATIVE_RSS_FEEDS: dict[str, list[str]] = {
     "axios.com": ["https://api.axios.com/feed/"],
     "bbc.com": ["http://feeds.bbci.co.uk/news/world/asia/rss.xml"],
     "theguardian.com": ["https://www.theguardian.com/world/china/rss"],
-    "reuters.com": ["https://www.reuters.com/world/china/rss/"],
     "ft.com": ["https://www.ft.com/world/asia-pacific/china?format=rss"],
     "economist.com": ["https://www.economist.com/china/rss.xml"],
     "france24.com": ["https://www.france24.com/en/asia-pacific/rss"],
     "aljazeera.com": ["https://www.aljazeera.com/xml/rss/all.xml"],
 }
 
-# 关键词 + Google News 时间范围 when:1d = 过去 24 小时
-CHINA_RSS_QUERY = "(China OR Chinese OR Taiwan OR Taiwanese) when:1d"
+# 关键词 + when:1d = 过去 24 小时（简单查询比 OR 语法更可靠）
+CHINA_RSS_QUERY = "China when:1d"
 CHINA_TITLE_PATTERN = re.compile(
     r"\b(china|chinese|taiwan|taiwanese)\b",
     re.IGNORECASE,
@@ -178,7 +176,8 @@ def _fetch_feed(url: str) -> feedparser.FeedParserDict:
         resp = requests.get(url, headers=headers, timeout=28)
         resp.raise_for_status()
         body = resp.content
-        if len(body) < 300 or b"<item" not in body.lower():
+        lower = body.lower()
+        if len(body) < 300 or (b"<item" not in lower and b"<entry" not in lower):
             return feedparser.parse("")
         return feedparser.parse(body)
     except Exception:
@@ -362,21 +361,9 @@ def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
     return published >= cutoff
 
 
-def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return all matching stories from this site (not just one headline)."""
-    domain = item["domain"]
-    feed = _fetch_feed(rss_url(domain))
-    entries: list[Any] = list(feed.entries)
-    if not entries:
-        entries = _native_rss_entries(domain)
-    if not entries:
-        entries = _search_fallback_entries(domain)
-    base = {
-        "country": item.get("category", item.get("country", "")),
-        "media_name": item.get("name", ""),
-        "media_url": item.get("url", ""),
-        "domain": domain,
-    }
+def _stories_from_entries(
+    entries: list[Any], base: dict[str, Any]
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
     for entry in entries:
@@ -399,7 +386,34 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "published_at": published.isoformat(timespec="minutes") if published else "",
             }
         )
-    return add_translations(rows)
+    return rows
+
+
+def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return all matching stories from this site (not just one headline)."""
+    domain = item["domain"]
+    base = {
+        "country": item.get("category", item.get("country", "")),
+        "media_name": item.get("name", ""),
+        "media_url": item.get("url", ""),
+        "domain": domain,
+    }
+    # Try each tier until one yields China-related stories. Google RSS often
+    # returns unrelated items even with site: + keyword query, so fall through
+    # when post-filtering removes every entry — not only when the feed is empty.
+    tiers = (
+        lambda: list(_fetch_feed(rss_url(domain)).entries),
+        lambda: _native_rss_entries(domain),
+        lambda: _search_fallback_entries(domain),
+    )
+    for get_entries in tiers:
+        entries = get_entries()
+        if not entries:
+            continue
+        rows = _stories_from_entries(entries, base)
+        if rows:
+            return add_translations(rows)
+    return []
 
 
 def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

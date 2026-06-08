@@ -22,9 +22,11 @@
       <a class="nav-link {% if active == 'pick' %}active{% endif %}" href="{{ url_for('pick') }}">
         <span class="nav-icon">☑</span>选择
       </a>
-      <a class="nav-link" href="{{ url_for('pick') }}#fetch">
-        <span class="nav-icon">↻</span>获取
-      </a>
+      <form method="post" action="{{ url_for('fetch_now') }}" class="nav-fetch">
+        <button type="submit" class="nav-link nav-fetch-btn">
+          <span class="nav-icon">↻</span>获取
+        </button>
+      </form>
     </div>
   </nav>
 </body>
