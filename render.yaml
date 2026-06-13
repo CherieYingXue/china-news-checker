@@ -6,6 +6,7 @@ services:
     repo: https://github.com/CherieYingXue/china-news-checker
     branch: main
     plan: free
+    autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 180 app:app
     envVars:

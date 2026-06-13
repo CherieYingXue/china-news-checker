@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import feedparser
 import requests
@@ -50,7 +50,12 @@ RSS_HEADERS = {
     "Referer": "https://news.google.com/",
 }
 BING_NEWS_QUERY = "China when:1d"
-IS_CLOUD_HOST = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+IS_CLOUD_HOST = bool(
+    os.getenv("RENDER")
+    or os.getenv("RENDER_SERVICE_ID")
+    or os.getenv("RENDER_EXTERNAL_URL")
+)
+APP_VERSION = "2026-06-14-fetch2"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -94,6 +99,10 @@ NATIVE_RSS_FEEDS: dict[str, list[str]] = {
 CHINA_RSS_QUERY = "China when:1d"
 CHINA_TITLE_PATTERN = re.compile(
     r"\b(china|chinese|taiwan|taiwanese)\b",
+    re.IGNORECASE,
+)
+CHINA_URL_PATTERN = re.compile(
+    r"/(china|chinese|taiwan|taiwanese)(/|$|-)",
     re.IGNORECASE,
 )
 
@@ -184,15 +193,19 @@ def _http_get(url: str, *, headers: dict[str, str] | None = None, timeout: int =
     hdrs = dict(headers or {})
     hdrs.setdefault("User-Agent", MOBILE_UA)
     hdrs.setdefault("Accept-Language", "en-US,en;q=0.9")
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, headers=hdrs, timeout=timeout)
-            if resp.status_code == 200 and resp.content:
-                return resp
-        except Exception:
-            pass
-        if attempt < 2:
-            time.sleep(0.35 * (attempt + 1))
+    candidates = [url]
+    if url.startswith("http://"):
+        candidates.append("https://" + url[7:])
+    for candidate in candidates:
+        for attempt in range(3):
+            try:
+                resp = requests.get(candidate, headers=hdrs, timeout=timeout)
+                if resp.status_code == 200 and resp.content:
+                    return resp
+            except Exception:
+                pass
+            if attempt < 2:
+                time.sleep(0.35 * (attempt + 1))
     return None
 
 
@@ -246,6 +259,21 @@ def _entries_from_news_sitemap(body: bytes) -> feedparser.FeedParserDict:
     return parsed
 
 
+def _resolve_publisher_link(href: str, domain: str) -> str:
+    """Unwrap Bing/DDG redirect URLs to the publisher link."""
+    href = href.strip()
+    if not href:
+        return href
+    if _domain_in_url(domain, href):
+        return href
+    host = urlparse(href).netloc.lower()
+    if "bing.com" in host or "duckduckgo.com" in host:
+        raw = parse_qs(urlparse(href).query).get("url", [None])[0]
+        if raw:
+            return unquote(raw)
+    return href
+
+
 def _domain_in_url(domain: str, url: str) -> bool:
     host = url.lower().split("/")[2] if "://" in url else url.lower()
     host = host.split(":")[0]
@@ -267,6 +295,7 @@ def _append_link(
         return
     href = href.strip()
     title = re.sub(r"\s+", " ", title or "").strip()
+    href = _resolve_publisher_link(href, domain)
     if not href.startswith("http") or not _domain_in_url(domain, href):
         return
     if any(x in href for x in ("bing.com", "google.com", "duckduckgo.com")):
@@ -277,7 +306,7 @@ def _append_link(
     if key in seen:
         return
     seen.add(key)
-    out.append({"title": title, "link": href})
+    out.append({"title": title, "link": href, "_trust_search_time": True})
 
 
 def _links_from_html(
@@ -290,6 +319,42 @@ def _links_from_html(
         href = (a.get("href") or "").strip()
         title = re.sub(r"\s+", " ", (a.get_text(" ", strip=True) or "")).strip()
         _append_link(out, seen, title=title, href=href, domain=domain, limit=limit)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _bing_rss_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[dict[str, str]]:
+    """Bing News RSS — reliable on datacenter IPs; query already uses when:1d."""
+    q = quote_plus(f"site:{domain} {BING_NEWS_QUERY}")
+    url = (
+        "https://www.bing.com/news/search?q="
+        + q
+        + "&format=rss&setlang=en-US&mkt=en-US"
+    )
+    headers = {
+        "User-Agent": DESKTOP_UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    resp = _http_get(url, headers=headers)
+    if resp is None:
+        return []
+    feed = feedparser.parse(resp.content)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in feed.entries:
+        title = re.sub(r"\s+", " ", (entry.get("title") or "")).strip()
+        link = _resolve_publisher_link((entry.get("link") or "").strip(), domain)
+        if not title or not link.startswith("http") or not _domain_in_url(domain, link):
+            continue
+        if not is_china_related(title, link):
+            continue
+        key = title.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title, "link": link, "_trust_search_time": True})
         if len(out) >= limit:
             break
     return out
@@ -350,7 +415,7 @@ def _duckduckgo_news_entries(
 
 
 def _search_fallback_entries(domain: str) -> list[dict[str, str]]:
-    for fetcher in (_bing_news_entries, _duckduckgo_news_entries):
+    for fetcher in (_bing_rss_entries, _bing_news_entries, _duckduckgo_news_entries):
         rows = fetcher(domain, limit=MAX_STORIES_PER_SITE)
         if rows:
             return rows
@@ -358,30 +423,31 @@ def _search_fallback_entries(domain: str) -> list[dict[str, str]]:
 
 
 def _native_rss_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[Any]:
-    """Publisher RSS filtered for China-related titles (works on cloud hosts)."""
+    """Publisher RSS entries (filtering happens in _stories_from_entries)."""
     feed_urls = NATIVE_RSS_FEEDS.get(domain, [])
     collected: list[Any] = []
     seen_titles: set[str] = set()
+    cap = limit * 4
     for feed_url in feed_urls:
         feed = _fetch_feed(feed_url)
         for entry in feed.entries:
             title = (entry.get("title") or "").strip()
-            if not title or not is_china_related(title):
-                continue
-            if not within_time_window(entry):
+            if not title:
                 continue
             key = title.lower()
             if key in seen_titles:
                 continue
             seen_titles.add(key)
             collected.append(entry)
-            if len(collected) >= limit:
+            if len(collected) >= cap:
                 return collected
     return collected
 
 
-def is_china_related(title: str) -> bool:
-    return bool(CHINA_TITLE_PATTERN.search(title))
+def is_china_related(title: str, link: str = "") -> bool:
+    if CHINA_TITLE_PATTERN.search(title):
+        return True
+    return bool(link and CHINA_URL_PATTERN.search(link))
 
 
 def entry_published_at(entry: Any) -> dt.datetime | None:
@@ -432,6 +498,12 @@ def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
     return published >= cutoff
 
 
+def _entry_passes_time(entry: Any) -> bool:
+    if entry.get("_trust_search_time"):
+        return True
+    return within_time_window(entry)
+
+
 def _stories_from_entries(
     entries: list[Any], base: dict[str, Any]
 ) -> list[dict[str, Any]]:
@@ -442,7 +514,7 @@ def _stories_from_entries(
             break
         title = (entry.get("title") or "").strip()
         link = (entry.get("link") or "").strip()
-        if not title or not is_china_related(title) or not within_time_window(entry):
+        if not title or not is_china_related(title, link) or not _entry_passes_time(entry):
             continue
         key = title.lower()
         if key in seen_titles:
@@ -647,26 +719,45 @@ def schedule_time_label() -> str:
 
 
 @app.route("/health")
+@app.route("/version")
 def health():
     probe_domain = "nytimes.com"
-    probe_rows = fetch_china_stories(
-        {
-            "domain": probe_domain,
-            "name": "The New York Times",
-            "url": "https://www.nytimes.com/",
-            "category": "美国媒体",
-        }
-    )
+    probe = _probe_fetch(probe_domain)
     return jsonify(
         {
             "status": "ok",
+            "version": APP_VERSION,
             "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
             "cloud": IS_CLOUD_HOST,
-            "sources": ["google-rss", "native-rss", "bing", "duckduckgo"],
+            "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
             "probe_domain": probe_domain,
-            "probe_stories": len(probe_rows),
+            "probe_stories": probe["stories"],
+            "probe_tiers": probe["tiers"],
         }
     )
+
+
+def _probe_fetch(domain: str) -> dict[str, Any]:
+    """Diagnose each fetch tier (used by /health)."""
+    tiers: dict[str, int] = {}
+    for name, getter in (
+        ("native", lambda: _native_rss_entries(domain)),
+        ("search", lambda: _search_fallback_entries(domain)),
+        ("google", lambda: _google_rss_entries(domain)),
+    ):
+        try:
+            tiers[name] = len(getter())
+        except Exception:
+            tiers[name] = -1
+    rows = fetch_china_stories(
+        {
+            "domain": domain,
+            "name": "probe",
+            "url": "",
+            "category": "",
+        }
+    )
+    return {"tiers": tiers, "stories": len(rows)}
 
 
 @app.route("/")
