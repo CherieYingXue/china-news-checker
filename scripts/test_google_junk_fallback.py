@@ -31,7 +31,7 @@ def test_fallback_when_google_entries_do_not_match() -> None:
 
     app_module._fetch_feed = fake_fetch
     try:
-        item = next(m for m in load_catalog() if m["domain"] == "cnn.com")
+        item = next(m for m in load_catalog() if m["domain"] == "bloomberg.com")
         rows = fetch_china_stories(item)
         assert rows, "Should fall back when Google entries fail keyword filter"
         for row in rows:

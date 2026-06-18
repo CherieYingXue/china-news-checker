@@ -37,6 +37,8 @@ def test_24h_query_config() -> None:
 
 def test_rss_fetch_per_site() -> None:
     total = 0
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    cutoff = now - __import__("datetime").timedelta(hours=TIME_WINDOW_HOURS)
     for item in CATALOG:
         rows = fetch_china_stories(item)
         print(f"  {item['name']}: {len(rows)} stories")
@@ -44,10 +46,15 @@ def test_rss_fetch_per_site() -> None:
             assert_china_title(r["title"])
             assert r.get("title_zh"), f"Missing Chinese title: {r['title']}"
             assert r["link"], f"Missing link: {r['title']}"
+            assert r.get("published_at"), f"Missing published_at: {r['title']}"
+            pub = __import__("datetime").datetime.fromisoformat(r["published_at"])
+            if pub.tzinfo is None:
+                pub = pub.replace(tzinfo=__import__("datetime").timezone.utc)
+            assert pub >= cutoff, f"Story older than 24h: {r['title']} ({pub})"
             assert item["domain"] in r["domain"] or r["domain"] == item["domain"]
         total += len(rows)
     assert total >= 3, "Expected at least 3 stories across all sites"
-    print(f"OK RSS fetch: {total} stories total, all titles match keywords")
+    print(f"OK RSS fetch: {total} stories total, all within 24h")
 
 
 def test_web_fetch_flow() -> None:

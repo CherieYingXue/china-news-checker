@@ -55,7 +55,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-06-14-fetch2"
+APP_VERSION = "2026-06-18-24h"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -105,6 +105,25 @@ CHINA_URL_PATTERN = re.compile(
     r"/(china|chinese|taiwan|taiwanese)(/|$|-)",
     re.IGNORECASE,
 )
+URL_DATE_PATTERNS = (
+    re.compile(r"/(\d{4})/(\d{1,2})/(\d{1,2})(?:/|$|[?#])"),
+    re.compile(r"-(\d{4})-(\d{2})-(\d{2})(?:/|$|[?#])"),
+    re.compile(r"/(\d{4})/([a-z]{3})/(\d{1,2})(?:/|$|[?#])", re.IGNORECASE),
+)
+URL_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "china-news-checker-dev-key")
@@ -306,7 +325,7 @@ def _append_link(
     if key in seen:
         return
     seen.add(key)
-    out.append({"title": title, "link": href, "_trust_search_time": True})
+    out.append({"title": title, "link": href})
 
 
 def _links_from_html(
@@ -325,7 +344,7 @@ def _links_from_html(
 
 
 def _bing_rss_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list[dict[str, str]]:
-    """Bing News RSS — reliable on datacenter IPs; query already uses when:1d."""
+    """Bing News RSS — fallback; entries must pass strict 24h date checks."""
     q = quote_plus(f"site:{domain} {BING_NEWS_QUERY}")
     url = (
         "https://www.bing.com/news/search?q="
@@ -354,7 +373,12 @@ def _bing_rss_entries(domain: str, *, limit: int = MAX_STORIES_PER_SITE) -> list
         if key in seen:
             continue
         seen.add(key)
-        out.append({"title": title, "link": link, "_trust_search_time": True})
+        row: dict[str, Any] = {"title": title, "link": link}
+        if entry.get("published_parsed"):
+            row["published_parsed"] = entry["published_parsed"]
+        if not within_time_window(row):
+            continue
+        out.append(row)
         if len(out) >= limit:
             break
     return out
@@ -450,6 +474,28 @@ def is_china_related(title: str, link: str = "") -> bool:
     return bool(link and CHINA_URL_PATTERN.search(link))
 
 
+def published_at_from_url(url: str) -> dt.datetime | None:
+    """Extract publication date embedded in common news URL paths."""
+    for pattern in URL_DATE_PATTERNS:
+        match = pattern.search(url)
+        if not match:
+            continue
+        year = int(match.group(1))
+        month_raw = match.group(2)
+        day = int(match.group(3))
+        if month_raw.isalpha():
+            month = URL_MONTHS.get(month_raw.lower()[:3])
+            if not month:
+                continue
+        else:
+            month = int(month_raw)
+        try:
+            return dt.datetime(year, month, day, tzinfo=dt.timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
 def entry_published_at(entry: Any) -> dt.datetime | None:
     for key in ("published_parsed", "updated_parsed", "created_parsed"):
         parsed = entry.get(key)
@@ -457,6 +503,9 @@ def entry_published_at(entry: Any) -> dt.datetime | None:
             return dt.datetime.fromtimestamp(
                 calendar.timegm(parsed), tz=dt.timezone.utc
             )
+    link = (entry.get("link") or "").strip()
+    if link:
+        return published_at_from_url(link)
     return None
 
 
@@ -492,16 +541,10 @@ def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
     published = entry_published_at(entry)
     if published is None:
-        return True
+        return False
     now = now or dt.datetime.now(dt.timezone.utc)
     cutoff = now - dt.timedelta(hours=TIME_WINDOW_HOURS)
     return published >= cutoff
-
-
-def _entry_passes_time(entry: Any) -> bool:
-    if entry.get("_trust_search_time"):
-        return True
-    return within_time_window(entry)
 
 
 def _stories_from_entries(
@@ -514,19 +557,25 @@ def _stories_from_entries(
             break
         title = (entry.get("title") or "").strip()
         link = (entry.get("link") or "").strip()
-        if not title or not is_china_related(title, link) or not _entry_passes_time(entry):
+        published = entry_published_at(entry)
+        if (
+            not title
+            or not link
+            or not is_china_related(title, link)
+            or published is None
+            or not within_time_window(entry)
+        ):
             continue
         key = title.lower()
         if key in seen_titles:
             continue
         seen_titles.add(key)
-        published = entry_published_at(entry)
         rows.append(
             {
                 **base,
                 "title": title,
                 "link": link,
-                "published_at": published.isoformat(timespec="minutes") if published else "",
+                "published_at": published.isoformat(timespec="minutes"),
             }
         )
     return rows
@@ -537,14 +586,12 @@ def _google_rss_entries(domain: str) -> list[Any]:
 
 
 def _fetch_tiers(domain: str) -> tuple[Any, ...]:
-    tiers = (
+    # Google RSS uses when:1d and has the most reliable recent timestamps.
+    return (
         lambda d=domain: _google_rss_entries(d),
         lambda d=domain: _native_rss_entries(d),
         lambda d=domain: _search_fallback_entries(d),
     )
-    if IS_CLOUD_HOST:
-        return (tiers[1], tiers[2], tiers[0])
-    return tiers
 
 
 def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
