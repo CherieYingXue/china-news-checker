@@ -15,7 +15,7 @@
 
 <div class="card">
   <h2>刷新</h2>
-  <p class="meta">定时任务 {{ schedule }} 将重复上次勾选的媒体。</p>
+  <p class="meta">定时任务 {{ schedule }} 将重复上次勾选的媒体；服务启动时也会自动获取一次。</p>
   <div class="btn-row">
     <a class="btn btn-ghost" href="{{ url_for('pick') }}">选择媒体</a>
     <form method="post" action="{{ url_for('fetch_now') }}" style="flex:1">

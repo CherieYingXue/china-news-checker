@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from pathlib import Path
+from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -32,6 +33,13 @@ CATEGORY_ORDER = ("美国媒体", "其他媒体")
 MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
 SETTINGS_LAST_KEYS = "last_picked_keys"
+SETTINGS_STARTUP_LOCK = "startup_fetch_started_at"
+DEFAULT_STARTUP_KEYS = (
+    "https://www.cnn.com/",
+    "https://www.nytimes.com/",
+    "https://www.theguardian.com/",
+)
+STARTUP_FETCH_COOLDOWN_SECONDS = 600
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -755,6 +763,15 @@ def last_scheduled_keys(catalog: list[dict[str, Any]]) -> list[str]:
     return [k for k in raw.splitlines() if k in allowed][:MAX_PICK]
 
 
+def keys_for_auto_fetch(catalog: list[dict[str, Any]]) -> list[str]:
+    """Last saved media keys, or default outlets on first run."""
+    keys = last_scheduled_keys(catalog)
+    if keys:
+        return keys
+    allowed = catalog_by_key(catalog)
+    return [k for k in DEFAULT_STARTUP_KEYS if k in allowed]
+
+
 def save_last_keys(keys: list[str]) -> None:
     setting_set(SETTINGS_LAST_KEYS, "\n".join(keys[:MAX_PICK]))
 
@@ -880,14 +897,76 @@ def clear_pick():
     return redirect(url_for("pick"))
 
 
-def scheduled_job() -> None:
+def run_auto_fetch(*, persist_keys: bool = False) -> int:
+    """Fetch headlines for saved (or default) media. Returns story count."""
     catalog = load_catalog()
     by_key = catalog_by_key(catalog)
-    keys = last_scheduled_keys(catalog)
+    keys = keys_for_auto_fetch(catalog)
     if not keys:
+        return 0
+    rows = fetch_all_stories([by_key[k] for k in keys])
+    save_run(rows)
+    if persist_keys:
+        save_last_keys(keys)
+    return len(rows)
+
+
+def startup_fetch_enabled() -> bool:
+    return os.getenv("STARTUP_FETCH", "1").strip().lower() not in ("0", "false", "no")
+
+
+def try_acquire_startup_fetch_lock(
+    *, cooldown_seconds: int = STARTUP_FETCH_COOLDOWN_SECONDS
+) -> bool:
+    """Let only one worker run startup fetch (gunicorn may spawn several)."""
+    now = dt.datetime.now(dt.timezone.utc)
+    conn = get_conn()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (SETTINGS_STARTUP_LOCK,)
+        ).fetchone()
+        if row:
+            try:
+                last = dt.datetime.fromisoformat(str(row["value"]))
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=dt.timezone.utc)
+                if (now - last).total_seconds() < cooldown_seconds:
+                    conn.execute("ROLLBACK")
+                    return False
+            except ValueError:
+                pass
+        conn.execute(
+            """
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (SETTINGS_STARTUP_LOCK, now.isoformat(timespec="seconds")),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def _startup_fetch_worker() -> None:
+    try:
+        run_auto_fetch(persist_keys=True)
+    except Exception:
+        pass
+
+
+def schedule_startup_fetch() -> None:
+    if not startup_fetch_enabled() or not try_acquire_startup_fetch_lock():
         return
-    items = [by_key[k] for k in keys]
-    save_run(fetch_all_stories(items))
+    Thread(target=_startup_fetch_worker, daemon=True).start()
+
+
+def scheduled_job() -> None:
+    run_auto_fetch()
 
 
 def start_scheduler() -> None:
@@ -909,6 +988,7 @@ def start_scheduler() -> None:
 def boot() -> None:
     init_db()
     start_scheduler()
+    schedule_startup_fetch()
 
 
 if __name__ == "__main__":

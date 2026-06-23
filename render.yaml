@@ -16,3 +16,5 @@ services:
         value: "8"
       - key: DAILY_RUN_MINUTE
         value: "0"
+      - key: STARTUP_FETCH
+        value: "1"
