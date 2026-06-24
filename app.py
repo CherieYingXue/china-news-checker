@@ -34,10 +34,13 @@ MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
 SETTINGS_LAST_KEYS = "last_picked_keys"
 SETTINGS_STARTUP_LOCK = "startup_fetch_started_at"
-DEFAULT_STARTUP_KEYS = (
-    "https://www.cnn.com/",
-    "https://www.nytimes.com/",
-    "https://www.theguardian.com/",
+# Older builds defaulted to only these three outlets; upgrade to full catalog.
+LEGACY_DEFAULT_KEYS = frozenset(
+    {
+        "https://www.cnn.com/",
+        "https://www.nytimes.com/",
+        "https://www.theguardian.com/",
+    }
 )
 STARTUP_FETCH_COOLDOWN_SECONDS = 600
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
@@ -63,7 +66,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-06-18-24h"
+APP_VERSION = "2026-06-24-all19"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -755,6 +758,18 @@ def session_keys() -> list[str]:
     return out[:MAX_PICK]
 
 
+def all_catalog_keys(catalog: list[dict[str, Any]]) -> list[str]:
+    return [str(m["key"]) for m in catalog][:MAX_PICK]
+
+
+def picked_keys(catalog: list[dict[str, Any]]) -> list[str]:
+    """Active media keys: session selection, or all catalog outlets by default."""
+    keys = session_keys()
+    if keys:
+        return keys
+    return all_catalog_keys(catalog)
+
+
 def last_scheduled_keys(catalog: list[dict[str, Any]]) -> list[str]:
     raw = setting_get(SETTINGS_LAST_KEYS)
     if not raw:
@@ -764,12 +779,14 @@ def last_scheduled_keys(catalog: list[dict[str, Any]]) -> list[str]:
 
 
 def keys_for_auto_fetch(catalog: list[dict[str, Any]]) -> list[str]:
-    """Last saved media keys, or default outlets on first run."""
+    """Last saved media keys, or all catalog outlets on first run."""
     keys = last_scheduled_keys(catalog)
     if keys:
+        if frozenset(keys) == LEGACY_DEFAULT_KEYS:
+            keys = all_catalog_keys(catalog)
+            save_last_keys(keys)
         return keys
-    allowed = catalog_by_key(catalog)
-    return [k for k in DEFAULT_STARTUP_KEYS if k in allowed]
+    return all_catalog_keys(catalog)
 
 
 def save_last_keys(keys: list[str]) -> None:
@@ -827,7 +844,9 @@ def _probe_fetch(domain: str) -> dict[str, Any]:
 @app.route("/")
 def home():
     catalog = load_catalog()
-    picked = [catalog_by_key(catalog)[k] for k in session_keys() if k in catalog_by_key(catalog)]
+    by_key = catalog_by_key(catalog)
+    active = picked_keys(catalog)
+    picked = [by_key[k] for k in active if k in by_key]
     conn = get_conn()
     last = conn.execute("SELECT run_at FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
@@ -860,9 +879,10 @@ def pick():
             flash("请至少选择一家媒体。", "error")
             return redirect(url_for("pick"))
         session[SESSION_KEYS] = keys[:MAX_PICK]
+        save_last_keys(keys[:MAX_PICK])
         flash("已保存选择，返回首页刷新新闻。", "success")
         return redirect(url_for("home"))
-    selected = set(session_keys())
+    selected = set(picked_keys(catalog))
     return render_template(
         "pick.html",
         title=APP_TITLE,
@@ -878,15 +898,12 @@ def pick():
 def fetch_now():
     catalog = load_catalog()
     by_key = catalog_by_key(catalog)
-    keys = [k for k in session_keys() if k in by_key]
-    if not keys:
-        flash("请先在「选择媒体」中勾选。", "error")
-        return redirect(url_for("pick"))
+    keys = [k for k in picked_keys(catalog) if k in by_key]
     items = [by_key[k] for k in keys]
     rows = fetch_all_stories(items)
     save_run(rows)
     save_last_keys(keys)
-    flash(f"已获取过去 24 小时内 {len(rows)} 条相关新闻。", "success")
+    flash(f"已从 {len(keys)} 家媒体获取过去 24 小时内 {len(rows)} 条相关新闻。", "success")
     return redirect(url_for("home"))
 
 

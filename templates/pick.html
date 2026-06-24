@@ -4,7 +4,7 @@
 <section class="hero">
   <span class="badge">{{ time_window }} · {{ keywords }}</span>
   <h1>选择媒体</h1>
-  <p class="lead">按「美国媒体」与「其他媒体」分类勾选，抓取过去 24 小时内中国相关新闻并显示中文翻译。</p>
+  <p class="lead">按「美国媒体」与「其他媒体」分类勾选（共 {{ catalog|length }} 家，默认全选），抓取过去 24 小时内中国相关新闻并显示中文翻译。</p>
 </section>
 
 {% with messages = get_flashed_messages(with_categories=true) %}

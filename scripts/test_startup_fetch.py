@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 
 import app as app_module  # noqa: E402
 from app import (  # noqa: E402
+    SETTINGS_LAST_KEYS,
     SETTINGS_STARTUP_LOCK,
     init_db,
     keys_for_auto_fetch,
@@ -23,8 +24,9 @@ def main() -> None:
     init_db()
     assert startup_fetch_enabled()
     catalog = load_catalog()
+    setting_set(SETTINGS_LAST_KEYS, "")
     keys = keys_for_auto_fetch(catalog)
-    assert keys, "Expected media keys for auto fetch"
+    assert len(keys) == len(catalog), f"Expected all {len(catalog)} media, got {len(keys)}"
     print("OK auto-fetch keys:", len(keys))
 
     setting_set(SETTINGS_STARTUP_LOCK, "2000-01-01T00:00:00")
