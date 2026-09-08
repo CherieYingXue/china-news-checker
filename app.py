@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 import csv
 import datetime as dt
+import html
 import json
 import os
 import re
@@ -21,7 +22,6 @@ import feedparser
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator, MyMemoryTranslator
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 BASE_DIR = Path(__file__).parent
@@ -44,6 +44,7 @@ LEGACY_DEFAULT_KEYS = frozenset(
 )
 STARTUP_FETCH_COOLDOWN_SECONDS = 600
 TRANSLATION_WORKERS = 3
+TRANSLATION_TIMEOUT_SECONDS = 8
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -537,29 +538,71 @@ def _valid_translation(source: str, translated: str | None) -> bool:
     )
 
 
-def translate_title(title: str, *, retries: int = 2) -> str:
+def _google_translate(text: str) -> str:
+    response = requests.get(
+        "https://clients5.google.com/translate_a/t",
+        params={
+            "client": "dict-chrome-ex",
+            "sl": "en",
+            "tl": "zh-CN",
+            "q": text,
+        },
+        headers={"User-Agent": DESKTOP_UA},
+        timeout=TRANSLATION_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return str(data[0]).strip() if isinstance(data, list) and data else ""
+
+
+def _google_mobile_translate(text: str) -> str:
+    response = requests.get(
+        "https://translate.google.com/m",
+        params={"sl": "en", "tl": "zh-CN", "q": text},
+        headers={"User-Agent": MOBILE_UA},
+        timeout=TRANSLATION_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    result = soup.select_one("div.result-container, div.t0")
+    return result.get_text(" ", strip=True) if result else ""
+
+
+def _mymemory_translate(text: str) -> str:
+    response = requests.get(
+        "https://api.mymemory.translated.net/get",
+        params={"q": text, "langpair": "en|zh-CN"},
+        headers={"User-Agent": DESKTOP_UA},
+        timeout=TRANSLATION_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json()
+    translated = (data.get("responseData") or {}).get("translatedText", "")
+    return html.unescape(str(translated)).strip()
+
+
+def translate_title(title: str, *, retries: int = 1) -> str:
     """Translate with a fallback provider; an error message is never saved as a title."""
     text = title.strip()
     if not text:
         return ""
     for attempt in range(retries):
         try:
-            translated = GoogleTranslator(source="en", target="zh-CN").translate(text)
+            translated = _google_translate(text)
             if _valid_translation(text, translated):
-                return translated.strip()
+                return translated
         except Exception:
             pass
         if attempt < retries - 1:
             time.sleep(0.4 * (attempt + 1))
 
-    try:
-        translated = MyMemoryTranslator(
-            source="english", target="chinese simplified"
-        ).translate(text)
-        if _valid_translation(text, translated):
-            return translated.strip()
-    except Exception:
-        pass
+    for provider in (_google_mobile_translate, _mymemory_translate):
+        try:
+            translated = provider(text)
+            if _valid_translation(text, translated):
+                return translated
+        except Exception:
+            continue
     return ""
 
 
