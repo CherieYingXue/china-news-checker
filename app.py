@@ -44,7 +44,10 @@ LEGACY_DEFAULT_KEYS = frozenset(
 )
 STARTUP_FETCH_COOLDOWN_SECONDS = 600
 TRANSLATION_WORKERS = 3
-TRANSLATION_TIMEOUT_SECONDS = 8
+HTTP_TIMEOUT_SECONDS = 6
+FETCH_BATCH_BUDGET_SECONDS = 60
+TRANSLATION_TIMEOUT_SECONDS = 5
+TRANSLATION_BATCH_BUDGET_SECONDS = 30
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -68,7 +71,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-09-08-reliability"
+APP_VERSION = "2026-09-08-bounded-refresh"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -227,24 +230,26 @@ def rss_url(domain: str) -> str:
     return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
 
 
-def _http_get(url: str, *, headers: dict[str, str] | None = None, timeout: int = 28) -> requests.Response | None:
-    """GET with retries — outbound fetches are flaky on cloud hosts."""
+def _http_get(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int = HTTP_TIMEOUT_SECONDS,
+) -> requests.Response | None:
+    """Bounded GET; source fallbacks provide resilience without long retries."""
     hdrs = dict(headers or {})
     hdrs.setdefault("User-Agent", MOBILE_UA)
     hdrs.setdefault("Accept-Language", "en-US,en;q=0.9")
     candidates = [url]
     if url.startswith("http://"):
-        candidates.append("https://" + url[7:])
+        candidates = ["https://" + url[7:]]
     for candidate in candidates:
-        for attempt in range(3):
-            try:
-                resp = requests.get(candidate, headers=hdrs, timeout=timeout)
-                if resp.status_code == 200 and resp.content:
-                    return resp
-            except Exception:
-                pass
-            if attempt < 2:
-                time.sleep(0.35 * (attempt + 1))
+        try:
+            resp = requests.get(candidate, headers=hdrs, timeout=timeout)
+            if resp.status_code == 200 and resp.content:
+                return resp
+        except Exception:
+            pass
     return None
 
 
@@ -440,7 +445,7 @@ def _duckduckgo_news_entries(
             "https://lite.duckduckgo.com/lite/",
             data={"q": query},
             headers=headers,
-            timeout=28,
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
     except Exception:
@@ -650,8 +655,15 @@ def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     translations = cached_translations(titles)
     missing = [title for title in titles if title and title not in translations]
     if missing:
+        deadline = time.monotonic() + TRANSLATION_BATCH_BUDGET_SECONDS
+
+        def translate_before_deadline(title: str) -> str:
+            if time.monotonic() >= deadline:
+                return ""
+            return translate_title(title)
+
         with ThreadPoolExecutor(max_workers=min(len(missing), TRANSLATION_WORKERS)) as pool:
-            values = pool.map(translate_title, missing)
+            values = pool.map(translate_before_deadline, missing)
         fresh = {title: value for title, value in zip(missing, values) if value}
         save_translations(fresh)
         translations.update(fresh)
@@ -721,7 +733,10 @@ def _fetch_tiers(domain: str) -> tuple[Any, ...]:
 
 
 def fetch_china_stories(
-    item: dict[str, Any], *, translate: bool = True
+    item: dict[str, Any],
+    *,
+    translate: bool = True,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """Return all matching stories from this site (not just one headline)."""
     domain = item["domain"]
@@ -736,7 +751,10 @@ def fetch_china_stories(
     # there and never reached native RSS or Bing/DuckDuckGo fallbacks.
     rows: list[dict[str, Any]] = []
     seen_titles: set[str] = set()
+    deadline = deadline or (time.monotonic() + FETCH_BATCH_BUDGET_SECONDS)
     for get_entries in _fetch_tiers(domain):
+        if time.monotonic() >= deadline:
+            break
         entries = get_entries()
         if not entries:
             continue
@@ -748,18 +766,29 @@ def fetch_china_stories(
             rows.append(row)
             if len(rows) >= MAX_STORIES_PER_SITE:
                 return add_translations(rows) if translate else rows
+        # A fallback is needed only when a source produced no usable stories.
+        # Continuing through every provider made a 19-site refresh take tens
+        # of minutes whenever blocked cloud-host requests timed out.
+        if rows:
+            break
     return add_translations(rows) if translate else rows
 
 
 def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not items:
         return []
+    deadline = time.monotonic() + FETCH_BATCH_BUDGET_SECONDS
     if len(items) == 1:
-        return fetch_china_stories(items[0])
+        return fetch_china_stories(items[0], deadline=deadline)
     rows: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
         futures = {
-            pool.submit(fetch_china_stories, item, translate=False): item
+            pool.submit(
+                fetch_china_stories,
+                item,
+                translate=False,
+                deadline=deadline,
+            ): item
             for item in items
         }
         for fut in as_completed(futures):

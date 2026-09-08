@@ -74,6 +74,34 @@ def test_translation_request_has_a_hard_timeout() -> None:
     assert get.call_args.kwargs["timeout"] == app_module.TRANSLATION_TIMEOUT_SECONDS
 
 
+def test_news_request_has_one_bounded_attempt() -> None:
+    with patch.object(
+        app_module.requests, "get", side_effect=TimeoutError("blocked")
+    ) as get:
+        assert app_module._http_get("https://blocked.example/feed") is None
+    assert get.call_count == 1
+    assert get.call_args.kwargs["timeout"] == app_module.HTTP_TIMEOUT_SECONDS
+
+
+def test_fetch_stops_after_first_usable_source() -> None:
+    first = Mock(return_value=[{"title": "entry"}])
+    fallback = Mock(side_effect=AssertionError("fallback should not run"))
+    row = {"title": "China story", "domain": "good.example"}
+    item = {
+        "domain": "good.example",
+        "name": "Good",
+        "url": "https://good.example",
+        "category": "Test",
+    }
+    with (
+        patch.object(app_module, "_fetch_tiers", return_value=(first, fallback)),
+        patch.object(app_module, "_stories_from_entries", return_value=[row]),
+    ):
+        assert app_module.fetch_china_stories(item, translate=False) == [row]
+    first.assert_called_once()
+    fallback.assert_not_called()
+
+
 def test_one_publisher_failure_does_not_fail_refresh() -> None:
     good = {
         "title": "China story",
@@ -81,7 +109,7 @@ def test_one_publisher_failure_does_not_fail_refresh() -> None:
         "domain": "good.example",
     }
 
-    def fake_fetch(item, *, translate=True):
+    def fake_fetch(item, *, translate=True, deadline=None):
         if item["domain"] == "bad.example":
             raise RuntimeError("blocked")
         return [good]
@@ -98,5 +126,7 @@ if __name__ == "__main__":
     test_health_is_fast_and_offline()
     test_translation_fallback_and_cache()
     test_translation_request_has_a_hard_timeout()
+    test_news_request_has_one_bounded_attempt()
+    test_fetch_stops_after_first_usable_source()
     test_one_publisher_failure_does_not_fail_refresh()
     print("ALL PASSED")
