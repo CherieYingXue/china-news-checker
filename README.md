@@ -20,4 +20,4 @@ python app.py
 
 1. 将本文件夹推送到 GitHub 新仓库 `china-news-checker`
 2. 在 [render.com](https://render.com) 用 GitHub 登录 → New Web Service → 选该仓库
-3. 使用 `render.yaml` 或启动命令：`gunicorn -w 2 -b 0.0.0.0:$PORT app:app`
+3. 使用 `render.yaml` 或启动命令：`gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 240 app:app`

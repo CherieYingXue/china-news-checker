@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import groupby
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
@@ -21,7 +21,7 @@ import feedparser
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
 BASE_DIR = Path(__file__).parent
@@ -43,6 +43,7 @@ LEGACY_DEFAULT_KEYS = frozenset(
     }
 )
 STARTUP_FETCH_COOLDOWN_SECONDS = 600
+TRANSLATION_WORKERS = 3
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -66,7 +67,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-06-24-all19"
+APP_VERSION = "2026-09-08-reliability"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -139,11 +140,13 @@ URL_MONTHS = {
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "china-news-checker-dev-key")
 scheduler = BackgroundScheduler(daemon=True)
+fetch_lock = Lock()
 
 
 def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -169,6 +172,11 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS translations (
+            title TEXT PRIMARY KEY,
+            title_zh TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
         """
     )
@@ -520,33 +528,95 @@ def entry_published_at(entry: Any) -> dt.datetime | None:
     return None
 
 
-def translate_title(title: str, *, retries: int = 3) -> str:
+def _valid_translation(source: str, translated: str | None) -> bool:
+    value = (translated or "").strip()
+    return bool(
+        value
+        and value.casefold() != source.casefold()
+        and re.search(r"[\u3400-\u9fff]", value)
+    )
+
+
+def translate_title(title: str, *, retries: int = 2) -> str:
+    """Translate with a fallback provider; an error message is never saved as a title."""
     text = title.strip()
     if not text:
         return ""
-    last_err: Exception | None = None
     for attempt in range(retries):
         try:
-            return GoogleTranslator(source="auto", target="zh-CN").translate(text)
-        except Exception as e:
-            last_err = e
+            translated = GoogleTranslator(source="en", target="zh-CN").translate(text)
+            if _valid_translation(text, translated):
+                return translated.strip()
+        except Exception:
+            pass
+        if attempt < retries - 1:
             time.sleep(0.4 * (attempt + 1))
-    return f"（翻译暂不可用：{text[:80]}）" if last_err else ""
+
+    try:
+        translated = MyMemoryTranslator(source="en", target="zh-CN").translate(text)
+        if _valid_translation(text, translated):
+            return translated.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def cached_translations(titles: list[str]) -> dict[str, str]:
+    unique = list(dict.fromkeys(title.strip() for title in titles if title.strip()))
+    if not unique:
+        return {}
+    placeholders = ",".join("?" for _ in unique)
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            f"SELECT title, title_zh FROM translations WHERE title IN ({placeholders})",
+            unique,
+        ).fetchall()
+        return {str(row["title"]): str(row["title_zh"]) for row in rows}
+    finally:
+        conn.close()
+
+
+def save_translations(translations: dict[str, str]) -> None:
+    valid = [(title, value) for title, value in translations.items() if value]
+    if not valid:
+        return
+    now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    conn = get_conn()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO translations (title, title_zh, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(title) DO UPDATE SET
+                title_zh = excluded.title_zh,
+                updated_at = excluded.updated_at
+            """,
+            [(title, value, now) for title, value in valid],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not rows:
         return rows
+    titles = list(dict.fromkeys(str(row.get("title", "")).strip() for row in rows))
+    translations = cached_translations(titles)
+    missing = [title for title in titles if title and title not in translations]
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(len(missing), TRANSLATION_WORKERS)) as pool:
+            values = pool.map(translate_title, missing)
+        fresh = {title: value for title, value in zip(missing, values) if value}
+        save_translations(fresh)
+        translations.update(fresh)
 
-    def translate_row(row: dict[str, Any]) -> dict[str, Any]:
+    translated_rows: list[dict[str, Any]] = []
+    for row in rows:
         out = dict(row)
-        out["title_zh"] = translate_title(out.get("title", ""))
-        return out
-
-    if len(rows) == 1:
-        return [translate_row(rows[0])]
-    with ThreadPoolExecutor(max_workers=min(len(rows), 3)) as pool:
-        return list(pool.map(translate_row, rows))
+        out["title_zh"] = translations.get(str(out.get("title", "")).strip(), "")
+        translated_rows.append(out)
+    return translated_rows
 
 
 def within_time_window(entry: Any, *, now: dt.datetime | None = None) -> bool:
@@ -605,7 +675,9 @@ def _fetch_tiers(domain: str) -> tuple[Any, ...]:
     )
 
 
-def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
+def fetch_china_stories(
+    item: dict[str, Any], *, translate: bool = True
+) -> list[dict[str, Any]]:
     """Return all matching stories from this site (not just one headline)."""
     domain = item["domain"]
     base = {
@@ -630,8 +702,8 @@ def fetch_china_stories(item: dict[str, Any]) -> list[dict[str, Any]]:
             seen_titles.add(key)
             rows.append(row)
             if len(rows) >= MAX_STORIES_PER_SITE:
-                return add_translations(rows)
-    return add_translations(rows)
+                return add_translations(rows) if translate else rows
+    return add_translations(rows) if translate else rows
 
 
 def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -641,10 +713,17 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return fetch_china_stories(items[0])
     rows: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
-        futures = {pool.submit(fetch_china_stories, item): item for item in items}
+        futures = {
+            pool.submit(fetch_china_stories, item, translate=False): item
+            for item in items
+        }
         for fut in as_completed(futures):
-            rows.extend(fut.result())
-    return rows
+            try:
+                rows.extend(fut.result())
+            except Exception:
+                # One blocked publisher must not discard successful outlets.
+                continue
+    return add_translations(rows)
 
 
 def save_run(rows: list[dict[str, Any]]) -> None:
@@ -802,20 +881,21 @@ def schedule_time_label() -> str:
 @app.route("/health")
 @app.route("/version")
 def health():
-    probe_domain = "nytimes.com"
-    probe = _probe_fetch(probe_domain)
-    return jsonify(
-        {
-            "status": "ok",
-            "version": APP_VERSION,
-            "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
-            "cloud": IS_CLOUD_HOST,
-            "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
-            "probe_domain": probe_domain,
-            "probe_stories": probe["stories"],
-            "probe_tiers": probe["tiers"],
-        }
-    )
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "version": APP_VERSION,
+        "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
+        "cloud": IS_CLOUD_HOST,
+        "refresh_running": fetch_lock.locked(),
+        "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
+    }
+    # Health checks must not depend on third-party news/translation services.
+    # Keep the expensive source probe available only for explicit diagnostics.
+    if request.args.get("probe") == "1":
+        probe_domain = request.args.get("domain", "nytimes.com")
+        payload["probe_domain"] = probe_domain
+        payload.update(_probe_fetch(probe_domain))
+    return jsonify(payload)
 
 
 def _probe_fetch(domain: str) -> dict[str, Any]:
@@ -836,7 +916,8 @@ def _probe_fetch(domain: str) -> dict[str, Any]:
             "name": "probe",
             "url": "",
             "category": "",
-        }
+        },
+        translate=False,
     )
     return {"tiers": tiers, "stories": len(rows)}
 
@@ -900,10 +981,22 @@ def fetch_now():
     by_key = catalog_by_key(catalog)
     keys = [k for k in picked_keys(catalog) if k in by_key]
     items = [by_key[k] for k in keys]
-    rows = fetch_all_stories(items)
-    save_run(rows)
-    save_last_keys(keys)
-    flash(f"已从 {len(keys)} 家媒体获取过去 24 小时内 {len(rows)} 条相关新闻。", "success")
+    if not fetch_lock.acquire(blocking=False):
+        flash("新闻正在刷新，请稍后再试。", "success")
+        return redirect(url_for("home"))
+    try:
+        rows = fetch_all_stories(items)
+        save_run(rows)
+        save_last_keys(keys)
+        flash(
+            f"已从 {len(keys)} 家媒体获取过去 24 小时内 {len(rows)} 条相关新闻。",
+            "success",
+        )
+    except Exception:
+        app.logger.exception("Manual news refresh failed")
+        flash("刷新暂时失败，已保留上一次结果，请稍后重试。", "error")
+    finally:
+        fetch_lock.release()
     return redirect(url_for("home"))
 
 
@@ -916,16 +1009,21 @@ def clear_pick():
 
 def run_auto_fetch(*, persist_keys: bool = False) -> int:
     """Fetch headlines for saved (or default) media. Returns story count."""
-    catalog = load_catalog()
-    by_key = catalog_by_key(catalog)
-    keys = keys_for_auto_fetch(catalog)
-    if not keys:
+    if not fetch_lock.acquire(blocking=False):
         return 0
-    rows = fetch_all_stories([by_key[k] for k in keys])
-    save_run(rows)
-    if persist_keys:
-        save_last_keys(keys)
-    return len(rows)
+    try:
+        catalog = load_catalog()
+        by_key = catalog_by_key(catalog)
+        keys = keys_for_auto_fetch(catalog)
+        if not keys:
+            return 0
+        rows = fetch_all_stories([by_key[k] for k in keys])
+        save_run(rows)
+        if persist_keys:
+            save_last_keys(keys)
+        return len(rows)
+    finally:
+        fetch_lock.release()
 
 
 def startup_fetch_enabled() -> bool:

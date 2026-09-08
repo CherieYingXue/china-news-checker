@@ -23,7 +23,7 @@ git push -u origin main
 2. **New +** → **Web Service** → 选择 **`china-news-checker`** 仓库  
 3. Name 可填 `china-news-checker`  
 4. Build Command：`pip install -r requirements.txt`  
-5. Start Command：`gunicorn -w 2 -b 0.0.0.0:$PORT app:app`  
+5. Start Command：`gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 240 app:app`  
 6. 点 **Create Web Service**  
 
 部署完成后公网地址一般为：
