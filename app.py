@@ -553,7 +553,9 @@ def translate_title(title: str, *, retries: int = 2) -> str:
             time.sleep(0.4 * (attempt + 1))
 
     try:
-        translated = MyMemoryTranslator(source="en", target="zh-CN").translate(text)
+        translated = MyMemoryTranslator(
+            source="english", target="chinese simplified"
+        ).translate(text)
         if _valid_translation(text, translated):
             return translated.strip()
     except Exception:
