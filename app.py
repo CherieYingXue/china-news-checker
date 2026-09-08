@@ -71,7 +71,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-09-08-no-startup-refresh"
+APP_VERSION = "2026-09-08-refresh-wait"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -1056,7 +1056,7 @@ def fetch_now():
     keys = [k for k in picked_keys(catalog) if k in by_key]
     items = [by_key[k] for k in keys]
     if not fetch_lock.acquire(blocking=False):
-        flash("新闻正在刷新，请稍后再试。", "success")
+        flash("新闻正在刷新，请耐心等待。", "success")
         return redirect(url_for("home"))
     try:
         rows = fetch_all_stories(items)

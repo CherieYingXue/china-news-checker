@@ -23,6 +23,18 @@ def test_health_is_fast_and_offline() -> None:
     assert "probe_stories" not in payload
 
 
+def test_in_progress_refresh_asks_user_to_wait() -> None:
+    assert app_module.fetch_lock.acquire(blocking=False)
+    try:
+        response = app_module.app.test_client().post("/fetch", follow_redirects=True)
+    finally:
+        app_module.fetch_lock.release()
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "新闻正在刷新，请耐心等待" in html
+    assert "请稍后再试" not in html
+
+
 def test_cloud_startup_refresh_is_disabled() -> None:
     with (
         patch.object(app_module, "IS_CLOUD_HOST", True),
@@ -132,6 +144,7 @@ def test_one_publisher_failure_does_not_fail_refresh() -> None:
 
 if __name__ == "__main__":
     test_health_is_fast_and_offline()
+    test_in_progress_refresh_asks_user_to_wait()
     test_cloud_startup_refresh_is_disabled()
     test_translation_fallback_and_cache()
     test_translation_request_has_a_hard_timeout()
