@@ -71,7 +71,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-09-08-bounded-refresh"
+APP_VERSION = "2026-09-08-no-startup-refresh"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -1101,6 +1101,11 @@ def run_auto_fetch(*, persist_keys: bool = False) -> int:
 
 
 def startup_fetch_enabled() -> bool:
+    # A refresh inside the Render web process can hold the manual-refresh lock
+    # for the lifetime of a bad background task. Cloud instances must become
+    # immediately usable; daily and manual refreshes remain available.
+    if IS_CLOUD_HOST:
+        return False
     return os.getenv("STARTUP_FETCH", "1").strip().lower() not in ("0", "false", "no")
 
 

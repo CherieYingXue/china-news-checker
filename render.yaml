@@ -9,7 +9,7 @@ services:
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     # One process owns SQLite and the scheduler; threads keep pages responsive
-    # while a manual or startup refresh is waiting on publisher APIs.
+    # while a manual or scheduled refresh is waiting on publisher APIs.
     startCommand: gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 240 --graceful-timeout 30 app:app
     healthCheckPath: /health
     envVars:
@@ -20,4 +20,4 @@ services:
       - key: DAILY_RUN_MINUTE
         value: "0"
       - key: STARTUP_FETCH
-        value: "1"
+        value: "0"

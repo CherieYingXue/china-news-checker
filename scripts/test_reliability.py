@@ -23,6 +23,14 @@ def test_health_is_fast_and_offline() -> None:
     assert "probe_stories" not in payload
 
 
+def test_cloud_startup_refresh_is_disabled() -> None:
+    with (
+        patch.object(app_module, "IS_CLOUD_HOST", True),
+        patch.dict(os.environ, {"STARTUP_FETCH": "1"}),
+    ):
+        assert not app_module.startup_fetch_enabled()
+
+
 def test_translation_fallback_and_cache() -> None:
     old_db_path = app_module.DB_PATH
     try:
@@ -124,6 +132,7 @@ def test_one_publisher_failure_does_not_fail_refresh() -> None:
 
 if __name__ == "__main__":
     test_health_is_fast_and_offline()
+    test_cloud_startup_refresh_is_disabled()
     test_translation_fallback_and_cache()
     test_translation_request_has_a_hard_timeout()
     test_news_request_has_one_bounded_attempt()
