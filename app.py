@@ -45,9 +45,20 @@ LEGACY_DEFAULT_KEYS = frozenset(
 STARTUP_FETCH_COOLDOWN_SECONDS = 600
 TRANSLATION_WORKERS = 3
 HTTP_TIMEOUT_SECONDS = 6
-FETCH_BATCH_BUDGET_SECONDS = 60
+FETCH_BATCH_BUDGET_SECONDS = int(os.getenv("FETCH_BATCH_BUDGET_SECONDS", "60"))
 TRANSLATION_TIMEOUT_SECONDS = 5
-TRANSLATION_BATCH_BUDGET_SECONDS = 30
+TRANSLATION_BATCH_BUDGET_SECONDS = int(os.getenv("TRANSLATION_BATCH_BUDGET_SECONDS", "30"))
+# The daily refresh must be finished by 22:00 GMT, so it starts a little earlier.
+DEFAULT_DAILY_RUN_HOUR = "21"
+DEFAULT_DAILY_RUN_MINUTE = "30"
+UPDATE_DEADLINE_LABEL = "22:00"
+# Render's free plan sleeps when idle and loses its SQLite file, so the daily
+# refresh runs in GitHub Actions and the site imports the published snapshot.
+DEFAULT_SNAPSHOT_URL = (
+    "https://raw.githubusercontent.com/CherieYingXue/china-news-checker/daily-data/latest.json"
+)
+SNAPSHOT_CHECK_INTERVAL_SECONDS = 60
+SNAPSHOT_TIMEOUT_SECONDS = 8
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -71,7 +82,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-09-08-refresh-wait"
+APP_VERSION = "2026-11-25-daily-2200-gmt"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -143,8 +154,10 @@ URL_MONTHS = {
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "china-news-checker-dev-key")
-scheduler = BackgroundScheduler(daemon=True)
+scheduler = BackgroundScheduler(daemon=True, timezone=dt.timezone.utc)
 fetch_lock = Lock()
+snapshot_lock = Lock()
+_last_snapshot_check = 0.0
 
 
 def get_conn() -> sqlite3.Connection:
@@ -800,8 +813,38 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return add_translations(rows)
 
 
-def save_run(rows: list[dict[str, Any]]) -> None:
-    now = dt.datetime.now().isoformat(timespec="seconds")
+def utc_now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_run_at(value: str | None) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def format_run_at(value: str | None) -> str | None:
+    parsed = parse_run_at(value)
+    if parsed is None:
+        return value
+    return parsed.strftime("%Y-%m-%d %H:%M GMT")
+
+
+def latest_run_at() -> str | None:
+    conn = get_conn()
+    row = conn.execute("SELECT run_at FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return row["run_at"] if row else None
+
+
+def save_run(rows: list[dict[str, Any]], *, run_at: str | None = None) -> None:
+    now = run_at or utc_now_iso()
     conn = get_conn()
     for r in rows:
         conn.execute(
@@ -886,6 +929,76 @@ def export_csv(run_at: str) -> None:
             )
 
 
+SNAPSHOT_FIELDS = ("country", "media_name", "media_url", "domain", "title", "title_zh", "link")
+
+
+def build_snapshot() -> dict[str, Any]:
+    """Fetch every catalog outlet; used by the daily GitHub Actions job."""
+    catalog = load_catalog()
+    rows = fetch_all_stories(catalog)
+    return {
+        "version": 1,
+        "run_at": utc_now_iso(),
+        "count": len(rows),
+        "headlines": [{k: r.get(k, "") for k in SNAPSHOT_FIELDS} for r in rows],
+    }
+
+
+def import_snapshot(snapshot: dict[str, Any]) -> bool:
+    """Store a snapshot as the latest run if it is newer than local data."""
+    snap_at = parse_run_at(snapshot.get("run_at"))
+    headlines = snapshot.get("headlines")
+    if snap_at is None or not isinstance(headlines, list) or not headlines:
+        return False
+    local_at = parse_run_at(latest_run_at())
+    if local_at is not None and local_at >= snap_at:
+        return False
+    rows = [
+        {k: str(h.get(k) or "") for k in SNAPSHOT_FIELDS}
+        for h in headlines
+        if isinstance(h, dict) and h.get("title") and h.get("domain")
+    ]
+    if not rows:
+        return False
+    save_run(rows, run_at=snap_at.isoformat(timespec="seconds"))
+    return True
+
+
+def snapshot_url() -> str:
+    return os.getenv("SNAPSHOT_URL", DEFAULT_SNAPSHOT_URL).strip()
+
+
+def sync_snapshot(*, force: bool = False) -> bool:
+    """Import the published daily snapshot, at most once per check interval."""
+    global _last_snapshot_check
+    url = snapshot_url()
+    if not url:
+        return False
+    if not snapshot_lock.acquire(blocking=False):
+        return False
+    try:
+        now = time.monotonic()
+        if not force and _last_snapshot_check and (
+            now - _last_snapshot_check < SNAPSHOT_CHECK_INTERVAL_SECONDS
+        ):
+            return False
+        _last_snapshot_check = now
+        try:
+            resp = requests.get(
+                url,
+                params={"t": int(time.time())},
+                timeout=SNAPSHOT_TIMEOUT_SECONDS,
+                headers={"Cache-Control": "no-cache"},
+            )
+            resp.raise_for_status()
+            return import_snapshot(resp.json())
+        except Exception:
+            app.logger.warning("Daily snapshot sync failed", exc_info=True)
+            return False
+    finally:
+        snapshot_lock.release()
+
+
 def catalog_by_key(catalog: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(i["key"]): i for i in catalog}
 
@@ -946,10 +1059,15 @@ def save_last_keys(keys: list[str]) -> None:
     setting_set(SETTINGS_LAST_KEYS, "\n".join(keys[:MAX_PICK]))
 
 
+def daily_run_time() -> tuple[int, int]:
+    hour = int(os.getenv("DAILY_RUN_HOUR", DEFAULT_DAILY_RUN_HOUR))
+    minute = int(os.getenv("DAILY_RUN_MINUTE", DEFAULT_DAILY_RUN_MINUTE))
+    return hour, minute
+
+
 def schedule_time_label() -> str:
-    h = os.getenv("DAILY_RUN_HOUR", "8")
-    m = os.getenv("DAILY_RUN_MINUTE", "0").zfill(2)
-    return f"{h}:{m}"
+    hour, minute = daily_run_time()
+    return f"{hour:02d}:{minute:02d} GMT"
 
 
 @app.route("/health")
@@ -961,6 +1079,8 @@ def health():
         "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
         "cloud": IS_CLOUD_HOST,
         "refresh_running": fetch_lock.locked(),
+        "daily_run_utc": schedule_time_label(),
+        "last_run": latest_run_at(),
         "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
     }
     # Health checks must not depend on third-party news/translation services.
@@ -998,13 +1118,12 @@ def _probe_fetch(domain: str) -> dict[str, Any]:
 
 @app.route("/")
 def home():
+    sync_snapshot()
     catalog = load_catalog()
     by_key = catalog_by_key(catalog)
     active = picked_keys(catalog)
     picked = [by_key[k] for k in active if k in by_key]
-    conn = get_conn()
-    last = conn.execute("SELECT run_at FROM runs ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
+    last_run = latest_run_at()
     rows = latest_headlines()
     grouped: list[dict[str, Any]] = []
     for name, items in groupby(rows, key=lambda r: r["media_name"]):
@@ -1016,8 +1135,9 @@ def home():
         picked=picked,
         rows=rows,
         grouped=grouped,
-        last_run=last["run_at"] if last else None,
+        last_run=format_run_at(last_run),
         schedule=schedule_time_label(),
+        update_deadline=UPDATE_DEADLINE_LABEL,
         last_scheduled=last_scheduled_keys(catalog),
         keywords=KEYWORDS_LABEL,
         time_window=TIME_WINDOW_LABEL,
@@ -1166,14 +1286,16 @@ def scheduled_job() -> None:
 def start_scheduler() -> None:
     if scheduler.running:
         return
-    hour = int(os.getenv("DAILY_RUN_HOUR", "8"))
-    minute = int(os.getenv("DAILY_RUN_MINUTE", "0"))
+    hour, minute = daily_run_time()
     scheduler.add_job(
         scheduled_job,
         "cron",
         id="daily_fetch",
         hour=hour,
         minute=minute,
+        timezone=dt.timezone.utc,
+        misfire_grace_time=3600,
+        coalesce=True,
         replace_existing=True,
     )
     scheduler.start()
@@ -1182,6 +1304,7 @@ def start_scheduler() -> None:
 def boot() -> None:
     init_db()
     start_scheduler()
+    Thread(target=sync_snapshot, kwargs={"force": True}, daemon=True).start()
     schedule_startup_fetch()
 
 

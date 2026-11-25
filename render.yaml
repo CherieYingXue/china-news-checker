@@ -15,9 +15,11 @@ services:
     envVars:
       - key: SECRET_KEY
         generateValue: true
+      # UTC. Finishes before 22:00 GMT; the GitHub Actions daily-refresh
+      # workflow is the primary trigger because free instances sleep.
       - key: DAILY_RUN_HOUR
-        value: "8"
+        value: "21"
       - key: DAILY_RUN_MINUTE
-        value: "0"
+        value: "30"
       - key: STARTUP_FETCH
         value: "0"

@@ -9,6 +9,9 @@ from unittest.mock import Mock, patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["STARTUP_FETCH"] = "0"
+os.environ["SNAPSHOT_URL"] = ""
+os.environ.pop("DAILY_RUN_HOUR", None)
+os.environ.pop("DAILY_RUN_MINUTE", None)
 
 import app as app_module  # noqa: E402
 
@@ -41,6 +44,63 @@ def test_cloud_startup_refresh_is_disabled() -> None:
         patch.dict(os.environ, {"STARTUP_FETCH": "1"}),
     ):
         assert not app_module.startup_fetch_enabled()
+
+
+def test_daily_job_runs_before_2200_gmt() -> None:
+    job = app_module.scheduler.get_job("daily_fetch")
+    assert job is not None
+    assert str(job.trigger.timezone) in ("UTC", "UTC+00:00")
+    run = job.trigger.get_next_fire_time(
+        None, app_module.dt.datetime(2026, 11, 25, 12, tzinfo=app_module.dt.timezone.utc)
+    )
+    assert run.astimezone(app_module.dt.timezone.utc).strftime("%H:%M") == "21:30"
+    assert app_module.schedule_time_label() == "21:30 GMT"
+
+
+def test_snapshot_import_keeps_newest_run() -> None:
+    old_db_path = app_module.DB_PATH
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_module.DB_PATH = Path(tmp) / "test.db"
+            app_module.init_db()
+            headline = {
+                "country": "",
+                "media_name": "Good",
+                "media_url": "https://good.example",
+                "domain": "good.example",
+                "title": "China story",
+                "title_zh": "中国新闻",
+                "link": "https://good.example/china",
+            }
+            snapshot = {"run_at": "2026-11-25T21:31:00+00:00", "headlines": [headline]}
+            assert app_module.import_snapshot(snapshot)
+            assert not app_module.import_snapshot(snapshot)
+            assert not app_module.import_snapshot(
+                {"run_at": "2026-11-24T21:31:00+00:00", "headlines": [headline]}
+            )
+            assert not app_module.import_snapshot(
+                {"run_at": "2026-11-26T21:31:00+00:00", "headlines": []}
+            )
+            rows = app_module.latest_headlines()
+            assert [r["title_zh"] for r in rows] == ["中国新闻"]
+            assert app_module.format_run_at(app_module.latest_run_at()) == "2026-11-25 21:31 GMT"
+
+            response = Mock()
+            response.json.return_value = {
+                "run_at": "2026-11-26T21:32:00+00:00",
+                "headlines": [dict(headline, title="Taiwan story")],
+            }
+            with (
+                patch.dict(os.environ, {"SNAPSHOT_URL": "https://snap.example/latest.json"}),
+                patch.object(app_module.requests, "get", return_value=response),
+            ):
+                assert app_module.sync_snapshot(force=True)
+                html = app_module.app.test_client().get("/").get_data(as_text=True)
+            assert "Taiwan story" in html
+            assert "2026-11-26 21:32 GMT" in html
+            assert "22:00" in html
+    finally:
+        app_module.DB_PATH = old_db_path
 
 
 def test_translation_fallback_and_cache() -> None:
@@ -146,6 +206,8 @@ if __name__ == "__main__":
     test_health_is_fast_and_offline()
     test_in_progress_refresh_asks_user_to_wait()
     test_cloud_startup_refresh_is_disabled()
+    test_daily_job_runs_before_2200_gmt()
+    test_snapshot_import_keeps_newest_run()
     test_translation_fallback_and_cache()
     test_translation_request_has_a_hard_timeout()
     test_news_request_has_one_bounded_attempt()

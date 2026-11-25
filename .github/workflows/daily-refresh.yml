@@ -1,0 +1,81 @@
+name: Daily news refresh
+
+# Publishes the daily headline snapshot before 22:00 GMT. The Render free
+# instance sleeps and loses its SQLite file, so the site imports this snapshot
+# from the daily-data branch instead of relying on its in-process scheduler.
+on:
+  schedule:
+    # GitHub cron is UTC (= GMT). The later run retries if the first one was
+    # delayed, dropped, or failed; it skips when a fresh snapshot exists.
+    - cron: "30 21 * * *"
+    - cron: "45 21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-refresh
+  cancel-in-progress: false
+
+env:
+  DATA_BRANCH: daily-data
+  SITE_URL: https://china-news-checker.onrender.com
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake the website
+        run: curl -fsS -m 60 "$SITE_URL/health" -o /dev/null || true
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Load previous snapshot
+        run: |
+          if git fetch --depth=1 origin "$DATA_BRANCH"; then
+            git show "origin/$DATA_BRANCH:latest.json" > /tmp/previous.json || true
+          fi
+
+      - name: Fetch headlines
+        env:
+          FETCH_BATCH_BUDGET_SECONDS: "180"
+          TRANSLATION_BATCH_BUDGET_SECONDS: "120"
+          # Manual runs always refresh; scheduled retries skip a fresh snapshot.
+          SKIP_HOURS: ${{ github.event_name == 'schedule' && '3' || '0' }}
+        run: |
+          python scripts/daily_snapshot.py \
+            --out /tmp/snapshot/latest.json \
+            --previous /tmp/previous.json \
+            --skip-if-newer-than-hours "$SKIP_HOURS"
+
+      - name: Publish snapshot
+        run: |
+          if [ ! -f /tmp/snapshot/latest.json ]; then
+            echo "Nothing to publish."
+            exit 0
+          fi
+          cd /tmp/snapshot
+          git init -q -b "$DATA_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add latest.json
+          git commit -q -m "Daily snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "HEAD:$DATA_BRANCH"
+
+      - name: Load snapshot on the website
+        run: |
+          sleep 70
+          for i in 1 2 3 4 5; do
+            curl -fsS -m 90 "$SITE_URL/" -o /dev/null && break
+            sleep 15
+          done
+          curl -fsS -m 60 "$SITE_URL/health"
