@@ -10,8 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["STARTUP_FETCH"] = "0"
 os.environ["SNAPSHOT_URL"] = ""
-os.environ.pop("DAILY_RUN_HOUR", None)
-os.environ.pop("DAILY_RUN_MINUTE", None)
+os.environ["DAILY_RUN_HOUR"] = "8"
+os.environ.pop("DAILY_RUN_UTC_HOUR", None)
+os.environ.pop("DAILY_RUN_UTC_MINUTE", None)
 
 import app as app_module  # noqa: E402
 

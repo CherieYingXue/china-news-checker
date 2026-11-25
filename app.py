@@ -82,7 +82,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-11-25-daily-2200-gmt"
+APP_VERSION = "2026-11-25-daily-2200-gmt-utc-env"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -1060,8 +1060,8 @@ def save_last_keys(keys: list[str]) -> None:
 
 
 def daily_run_time() -> tuple[int, int]:
-    hour = int(os.getenv("DAILY_RUN_HOUR", DEFAULT_DAILY_RUN_HOUR))
-    minute = int(os.getenv("DAILY_RUN_MINUTE", DEFAULT_DAILY_RUN_MINUTE))
+    hour = int(os.getenv("DAILY_RUN_UTC_HOUR", DEFAULT_DAILY_RUN_HOUR))
+    minute = int(os.getenv("DAILY_RUN_UTC_MINUTE", DEFAULT_DAILY_RUN_MINUTE))
     return hour, minute
 
 

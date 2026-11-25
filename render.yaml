@@ -17,9 +17,9 @@ services:
         generateValue: true
       # UTC. Finishes before 22:00 GMT; the GitHub Actions daily-refresh
       # workflow is the primary trigger because free instances sleep.
-      - key: DAILY_RUN_HOUR
+      - key: DAILY_RUN_UTC_HOUR
         value: "21"
-      - key: DAILY_RUN_MINUTE
+      - key: DAILY_RUN_UTC_MINUTE
         value: "30"
       - key: STARTUP_FETCH
         value: "0"
