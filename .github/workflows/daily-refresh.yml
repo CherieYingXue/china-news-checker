@@ -43,6 +43,11 @@ jobs:
         run: |
           if git fetch --depth=1 origin "$DATA_BRANCH"; then
             git show "origin/$DATA_BRANCH:latest.json" > /tmp/previous.json || true
+            # The website is asked to load this revision if nothing new is published.
+            if [ -s /tmp/previous.json ]; then
+              cp /tmp/previous.json /tmp/expected.json
+              echo "SNAPSHOT_SHA=$(git rev-parse "origin/$DATA_BRANCH")" >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Fetch headlines
@@ -70,12 +75,42 @@ jobs:
           git add latest.json
           git commit -q -m "Daily snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "HEAD:$DATA_BRANCH"
+          cp latest.json /tmp/expected.json
+          echo "SNAPSHOT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Fails the run when the website does not end up serving the snapshot, so
+      # a stale site shows up as a failed workflow instead of passing silently.
       - name: Load snapshot on the website
         run: |
-          sleep 70
-          for i in 1 2 3 4 5; do
-            curl -fsS -m 90 "$SITE_URL/" -o /dev/null && break
-            sleep 15
+          if [ -z "${SNAPSHOT_SHA:-}" ] || [ ! -s /tmp/expected.json ]; then
+            echo "No snapshot to load."
+            exit 0
+          fi
+          for i in 1 2 3 4 5 6; do
+            result=$(curl -sS -m 90 -X POST "$SITE_URL/snapshot/sync?sha=$SNAPSHOT_SHA" || true)
+            echo "$result"
+            if RESULT="$result" python - <<'EOF'
+          import datetime as dt
+          import json
+          import os
+          import sys
+
+          def parse(value):
+              parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+              return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+          expected = json.load(open("/tmp/expected.json", encoding="utf-8"))["run_at"]
+          try:
+              last_run = json.loads(os.environ["RESULT"]).get("last_run")
+              sys.exit(0 if last_run and parse(last_run) >= parse(expected) else 1)
+          except ValueError:
+              sys.exit(1)
+          EOF
+            then
+              echo "Website is serving the snapshot from $SNAPSHOT_SHA."
+              exit 0
+            fi
+            sleep 20
           done
-          curl -fsS -m 60 "$SITE_URL/health"
+          echo "::error::The website did not load snapshot $SNAPSHOT_SHA; see the snapshot status above."
+          exit 1

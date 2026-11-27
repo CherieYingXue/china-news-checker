@@ -59,6 +59,13 @@ DEFAULT_SNAPSHOT_URL = (
 )
 SNAPSHOT_CHECK_INTERVAL_SECONDS = 60
 SNAPSHOT_TIMEOUT_SECONDS = 8
+# raw.githubusercontent.com ignores query strings when caching branch URLs, so
+# the daily workflow passes the published commit id and the site fetches that
+# immutable revision instead.
+SNAPSHOT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+RAW_GITHUB_URL_PATTERN = re.compile(
+    r"^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$"
+)
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -82,7 +89,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-11-25-daily-2200-gmt-utc-env"
+APP_VERSION = "2026-11-27-pinned-snapshot-sync"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -158,6 +165,7 @@ scheduler = BackgroundScheduler(daemon=True, timezone=dt.timezone.utc)
 fetch_lock = Lock()
 snapshot_lock = Lock()
 _last_snapshot_check = 0.0
+_snapshot_status: dict[str, Any] = {}
 
 
 def get_conn() -> sqlite3.Connection:
@@ -968,33 +976,75 @@ def snapshot_url() -> str:
     return os.getenv("SNAPSHOT_URL", DEFAULT_SNAPSHOT_URL).strip()
 
 
-def sync_snapshot(*, force: bool = False) -> bool:
-    """Import the published daily snapshot, at most once per check interval."""
-    global _last_snapshot_check
+def snapshot_urls(sha: str | None = None) -> list[str]:
+    """Snapshot sources; a commit id pins raw GitHub and adds a jsDelivr mirror."""
     url = snapshot_url()
     if not url:
+        return []
+    match = RAW_GITHUB_URL_PATTERN.match(url)
+    if not sha or not match:
+        return [url]
+    owner, repo, _ref, path = match.groups()
+    return [
+        f"https://raw.githubusercontent.com/{owner}/{repo}/{sha}/{path}",
+        f"https://cdn.jsdelivr.net/gh/{owner}/{repo}@{sha}/{path}",
+    ]
+
+
+def snapshot_status() -> dict[str, Any]:
+    return dict(_snapshot_status)
+
+
+def _set_snapshot_status(**fields: Any) -> None:
+    _snapshot_status.clear()
+    _snapshot_status.update(checked_at=utc_now_iso(), **fields)
+
+
+def sync_snapshot(*, force: bool = False, sha: str | None = None) -> bool:
+    """Import the published daily snapshot, at most once per check interval."""
+    global _last_snapshot_check
+    urls = snapshot_urls(sha)
+    if not urls:
         return False
     if not snapshot_lock.acquire(blocking=False):
         return False
     try:
+        if sha and _snapshot_status.get("sha") == sha and _snapshot_status.get("result") != "error":
+            return False
         now = time.monotonic()
-        if not force and _last_snapshot_check and (
+        if not force and not sha and _last_snapshot_check and (
             now - _last_snapshot_check < SNAPSHOT_CHECK_INTERVAL_SECONDS
         ):
             return False
         _last_snapshot_check = now
-        try:
-            resp = requests.get(
-                url,
-                params={"t": int(time.time())},
-                timeout=SNAPSHOT_TIMEOUT_SECONDS,
-                headers={"Cache-Control": "no-cache"},
+        errors: list[str] = []
+        for url in urls:
+            source = urlparse(url).netloc
+            try:
+                resp = requests.get(
+                    url,
+                    params={"t": int(time.time())},
+                    timeout=SNAPSHOT_TIMEOUT_SECONDS,
+                    headers={"Cache-Control": "no-cache"},
+                )
+                resp.raise_for_status()
+                snapshot = resp.json()
+                if not isinstance(snapshot, dict):
+                    raise ValueError("snapshot is not a JSON object")
+                imported = import_snapshot(snapshot)
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {exc}"[:300])
+                continue
+            _set_snapshot_status(
+                result="imported" if imported else "up-to-date",
+                source=source,
+                sha=sha or "",
+                remote_run_at=str(snapshot.get("run_at") or ""),
             )
-            resp.raise_for_status()
-            return import_snapshot(resp.json())
-        except Exception:
-            app.logger.warning("Daily snapshot sync failed", exc_info=True)
-            return False
+            return imported
+        app.logger.warning("Daily snapshot sync failed: %s", "; ".join(errors))
+        _set_snapshot_status(result="error", sha=sha or "", errors=errors)
+        return False
     finally:
         snapshot_lock.release()
 
@@ -1081,6 +1131,7 @@ def health():
         "refresh_running": fetch_lock.locked(),
         "daily_run_utc": schedule_time_label(),
         "last_run": latest_run_at(),
+        "snapshot": snapshot_status(),
         "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
     }
     # Health checks must not depend on third-party news/translation services.
@@ -1090,6 +1141,16 @@ def health():
         payload["probe_domain"] = probe_domain
         payload.update(_probe_fetch(probe_domain))
     return jsonify(payload)
+
+
+@app.route("/snapshot/sync", methods=["POST"])
+def snapshot_sync():
+    """Called by the daily workflow right after it publishes a snapshot."""
+    sha = (request.args.get("sha") or request.form.get("sha") or "").strip().lower()
+    if sha and not SNAPSHOT_SHA_PATTERN.match(sha):
+        return jsonify({"error": "sha must be a 40-character commit id"}), 400
+    sync_snapshot(sha=sha or None)
+    return jsonify({"last_run": latest_run_at(), "snapshot": snapshot_status()})
 
 
 def _probe_fetch(domain: str) -> dict[str, Any]:
