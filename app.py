@@ -11,7 +11,8 @@ import os
 import re
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import TimeoutError as FuturesTimeout
 from itertools import groupby
 from pathlib import Path
 from threading import Lock, Thread
@@ -48,6 +49,9 @@ HTTP_TIMEOUT_SECONDS = 6
 FETCH_BATCH_BUDGET_SECONDS = int(os.getenv("FETCH_BATCH_BUDGET_SECONDS", "60"))
 TRANSLATION_TIMEOUT_SECONDS = 5
 TRANSLATION_BATCH_BUDGET_SECONDS = int(os.getenv("TRANSLATION_BATCH_BUDGET_SECONDS", "30"))
+# Request timeouts only bound each socket read, so a stalled call can outlive the
+# budget. Batches stop waiting this long after their budget and keep what finished.
+BATCH_GRACE_SECONDS = 15
 # The daily refresh must be finished by 22:00 GMT, so it starts a little earlier.
 DEFAULT_DAILY_RUN_HOUR = "21"
 DEFAULT_DAILY_RUN_MINUTE = "30"
@@ -675,9 +679,23 @@ def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 return ""
             return translate_title(title)
 
-        with ThreadPoolExecutor(max_workers=min(len(missing), TRANSLATION_WORKERS)) as pool:
-            values = pool.map(translate_before_deadline, missing)
-        fresh = {title: value for title, value in zip(missing, values) if value}
+        pool = ThreadPoolExecutor(max_workers=min(len(missing), TRANSLATION_WORKERS))
+        try:
+            futures = {pool.submit(translate_before_deadline, t): t for t in missing}
+            done, _ = wait(
+                futures,
+                timeout=max(0.0, deadline - time.monotonic()) + BATCH_GRACE_SECONDS,
+            )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        fresh = {}
+        for fut in done:
+            try:
+                value = fut.result()
+            except Exception:
+                continue
+            if value:
+                fresh[futures[fut]] = value
         save_translations(fresh)
         translations.update(fresh)
 
@@ -791,10 +809,9 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not items:
         return []
     deadline = time.monotonic() + FETCH_BATCH_BUDGET_SECONDS
-    if len(items) == 1:
-        return fetch_china_stories(items[0], deadline=deadline)
     rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
+    pool = ThreadPoolExecutor(max_workers=min(len(items), 8))
+    try:
         futures = {
             pool.submit(
                 fetch_china_stories,
@@ -804,12 +821,21 @@ def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ): item
             for item in items
         }
-        for fut in as_completed(futures):
-            try:
-                rows.extend(fut.result())
-            except Exception:
-                # One blocked publisher must not discard successful outlets.
-                continue
+        try:
+            for fut in as_completed(
+                futures,
+                timeout=max(0.0, deadline - time.monotonic()) + BATCH_GRACE_SECONDS,
+            ):
+                try:
+                    rows.extend(fut.result())
+                except Exception:
+                    # One blocked publisher must not discard successful outlets.
+                    continue
+        except FuturesTimeout:
+            stalled = [futures[f]["domain"] for f in futures if not f.done()]
+            app.logger.warning("News fetch stopped waiting for: %s", ", ".join(stalled))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     return add_translations(rows)
 
 
