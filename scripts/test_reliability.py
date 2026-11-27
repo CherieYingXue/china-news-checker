@@ -104,6 +104,64 @@ def test_snapshot_import_keeps_newest_run() -> None:
         app_module.DB_PATH = old_db_path
 
 
+def test_pinned_snapshot_sync_falls_back_to_mirror() -> None:
+    sha = "c464336fa43c4decd645a07e6b5f372e69521a05"
+    old_db_path = app_module.DB_PATH
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            app_module.DB_PATH = Path(tmp) / "test.db"
+            app_module.init_db()
+            app_module._snapshot_status.clear()
+            client = app_module.app.test_client()
+            assert client.post("/snapshot/sync?sha=daily-data").status_code == 400
+
+            response = Mock()
+            response.json.return_value = {
+                "run_at": "2026-11-27T03:44:38+00:00",
+                "headlines": [
+                    {"title": "China story", "domain": "good.example", "media_name": "Good"}
+                ],
+            }
+
+            def fake_get(url, **kwargs):
+                if "raw.githubusercontent.com" in url:
+                    raise app_module.requests.HTTPError("429 Too Many Requests")
+                return response
+
+            raw_url = (
+                "https://raw.githubusercontent.com/owner/repo/daily-data/latest.json"
+            )
+            with (
+                patch.dict(os.environ, {"SNAPSHOT_URL": raw_url}),
+                patch.object(app_module.requests, "get", side_effect=fake_get) as get,
+            ):
+                result = client.post(f"/snapshot/sync?sha={sha}").get_json()
+                assert [c.args[0] for c in get.call_args_list] == [
+                    f"https://raw.githubusercontent.com/owner/repo/{sha}/latest.json",
+                    f"https://cdn.jsdelivr.net/gh/owner/repo@{sha}/latest.json",
+                ]
+                assert result["last_run"] == "2026-11-27T03:44:38+00:00"
+                assert result["snapshot"]["result"] == "imported"
+                assert result["snapshot"]["source"] == "cdn.jsdelivr.net"
+
+                client.post(f"/snapshot/sync?sha={sha}")
+                assert get.call_count == 2
+
+            with (
+                patch.dict(os.environ, {"SNAPSHOT_URL": raw_url}),
+                patch.object(
+                    app_module.requests, "get", side_effect=TimeoutError("blocked")
+                ),
+            ):
+                assert not app_module.sync_snapshot(sha="0" * 40)
+            status = client.get("/health").get_json()["snapshot"]
+            assert status["result"] == "error"
+            assert len(status["errors"]) == 2
+    finally:
+        app_module.DB_PATH = old_db_path
+        app_module._snapshot_status.clear()
+
+
 def test_translation_fallback_and_cache() -> None:
     old_db_path = app_module.DB_PATH
     try:
@@ -209,6 +267,7 @@ if __name__ == "__main__":
     test_cloud_startup_refresh_is_disabled()
     test_daily_job_runs_before_2200_gmt()
     test_snapshot_import_keeps_newest_run()
+    test_pinned_snapshot_sync_falls_back_to_mirror()
     test_translation_fallback_and_cache()
     test_translation_request_has_a_hard_timeout()
     test_news_request_has_one_bounded_attempt()
