@@ -8,18 +8,10 @@ services:
     plan: free
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    # One process owns SQLite and the scheduler; threads keep pages responsive
-    # while a manual or scheduled refresh is waiting on publisher APIs.
+    # One process owns SQLite and the in-memory refresh status; threads keep
+    # pages responsive while a refresh is waiting on publisher APIs.
     startCommand: gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 240 --graceful-timeout 30 app:app
     healthCheckPath: /health
     envVars:
       - key: SECRET_KEY
         generateValue: true
-      # UTC. Finishes before 22:00 GMT; the GitHub Actions daily-refresh
-      # workflow is the primary trigger because free instances sleep.
-      - key: DAILY_RUN_UTC_HOUR
-        value: "21"
-      - key: DAILY_RUN_UTC_MINUTE
-        value: "30"
-      - key: STARTUP_FETCH
-        value: "0"

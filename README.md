@@ -22,9 +22,8 @@ python app.py
 2. 在 [render.com](https://render.com) 用 GitHub 登录 → New Web Service → 选该仓库
 3. 使用 `render.yaml` 或启动命令：`gunicorn -w 1 --threads 4 -b 0.0.0.0:$PORT --timeout 240 app:app`
 
-## 每日自动更新（GMT 22:00 前）
+## 更新新闻
 
-Render 免费实例闲置会休眠并丢失 SQLite 数据，因此每日更新由 GitHub Actions
-（`.github/workflows/daily-refresh.yml`）在 GMT 21:30 执行（21:45 自动重试），
-把结果发布到 `daily-data` 分支的 `latest.json`；网站启动或打开首页时自动导入最新快照。
-可在 GitHub → Actions → Daily news refresh → Run workflow 手动触发。
+网站不会自动更新。打开首页点「获取新闻」即可获取所选媒体过去 24 小时内的新闻，
+通常约 1 分钟，期间页面会自动刷新显示进度。Render 免费实例闲置后会休眠并清空数据，
+再次打开时点一次「获取新闻」即可。

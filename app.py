@@ -11,16 +11,16 @@ import os
 import re
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import zlib
+from concurrent.futures import ThreadPoolExecutor, wait
 from itertools import groupby
 from pathlib import Path
 from threading import Lock, Thread
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import feedparser
 import requests
-from apscheduler.schedulers.background import BackgroundScheduler
 from bs4 import BeautifulSoup
 from flask import Flask, flash, jsonify, redirect, render_template, request, session, url_for
 
@@ -32,33 +32,16 @@ MAX_PICK = 25
 CATEGORY_ORDER = ("美国媒体", "其他媒体")
 MAX_STORIES_PER_SITE = 15
 SESSION_KEYS = "picked_media_keys"
-SETTINGS_LAST_KEYS = "last_picked_keys"
-SETTINGS_STARTUP_LOCK = "startup_fetch_started_at"
-# Older builds defaulted to only these three outlets; upgrade to full catalog.
-LEGACY_DEFAULT_KEYS = frozenset(
-    {
-        "https://www.cnn.com/",
-        "https://www.nytimes.com/",
-        "https://www.theguardian.com/",
-    }
-)
-STARTUP_FETCH_COOLDOWN_SECONDS = 600
 TRANSLATION_WORKERS = 3
 HTTP_TIMEOUT_SECONDS = 6
+MAX_RESPONSE_BYTES = 5_000_000
 FETCH_BATCH_BUDGET_SECONDS = int(os.getenv("FETCH_BATCH_BUDGET_SECONDS", "60"))
 TRANSLATION_TIMEOUT_SECONDS = 5
 TRANSLATION_BATCH_BUDGET_SECONDS = int(os.getenv("TRANSLATION_BATCH_BUDGET_SECONDS", "30"))
-# The daily refresh must be finished by 22:00 GMT, so it starts a little earlier.
-DEFAULT_DAILY_RUN_HOUR = "21"
-DEFAULT_DAILY_RUN_MINUTE = "30"
-UPDATE_DEADLINE_LABEL = "22:00"
-# Render's free plan sleeps when idle and loses its SQLite file, so the daily
-# refresh runs in GitHub Actions and the site imports the published snapshot.
-DEFAULT_SNAPSHOT_URL = (
-    "https://raw.githubusercontent.com/CherieYingXue/china-news-checker/daily-data/latest.json"
-)
-SNAPSHOT_CHECK_INTERVAL_SECONDS = 60
-SNAPSHOT_TIMEOUT_SECONDS = 8
+# Extra time a publisher fetch may take after the batch budget before the
+# refresh stops waiting for it and saves what it has.
+STRAGGLER_GRACE_SECONDS = 10
+REFRESH_POLL_SECONDS = 5
 KEYWORDS_LABEL = "China, Chinese, Taiwan, Taiwanese"
 TIME_WINDOW_HOURS = 24
 TIME_WINDOW_LABEL = "past 24 hours"
@@ -82,7 +65,7 @@ IS_CLOUD_HOST = bool(
     or os.getenv("RENDER_SERVICE_ID")
     or os.getenv("RENDER_EXTERNAL_URL")
 )
-APP_VERSION = "2026-11-25-daily-2200-gmt-utc-env"
+APP_VERSION = "2026-11-27-manual-refresh-bounded"
 
 # Direct publisher RSS feeds — work when search engines block cloud/datacenter IPs.
 NATIVE_RSS_FEEDS: dict[str, list[str]] = {
@@ -154,10 +137,8 @@ URL_MONTHS = {
 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "china-news-checker-dev-key")
-scheduler = BackgroundScheduler(daemon=True, timezone=dt.timezone.utc)
 fetch_lock = Lock()
-snapshot_lock = Lock()
-_last_snapshot_check = 0.0
+_refresh_status: dict[str, Any] = {}
 
 
 def get_conn() -> sqlite3.Connection:
@@ -218,24 +199,51 @@ def load_catalog() -> list[dict[str, Any]]:
     return data
 
 
-def setting_get(key: str) -> str | None:
-    conn = get_conn()
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
-    return str(row["value"]) if row else None
+def bounded_request(
+    send: Callable[..., requests.Response], url: str, *, timeout: float, **kwargs: Any
+) -> requests.Response:
+    """Send a request whose whole download must finish within ``timeout``.
+
+    requests' own timeout applies to each socket read, and its buffered reads
+    wait for a full chunk, so a server that keeps trickling bytes could
+    otherwise hold a refresh open indefinitely. ``read1`` returns after a
+    single socket read, letting the deadline be checked between reads.
+    """
+    started = time.monotonic()
+    headers = dict(kwargs.pop("headers", None) or {})
+    headers["Accept-Encoding"] = "gzip, deflate"
+    resp = send(url, timeout=timeout, stream=True, headers=headers, **kwargs)
+    body = bytearray()
+    try:
+        while True:
+            chunk = resp.raw.read1(65536, decode_content=False)
+            if not chunk:
+                break
+            body.extend(chunk)
+            if time.monotonic() - started > timeout:
+                raise requests.Timeout(f"{url} took longer than {timeout}s")
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise requests.RequestException(f"{url} response is too large")
+    finally:
+        resp.close()
+    resp._content = _decode_body(bytes(body), resp.headers.get("Content-Encoding", ""))
+    return resp
 
 
-def setting_set(key: str, value: str) -> None:
-    conn = get_conn()
-    conn.execute(
-        """
-        INSERT INTO settings (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """,
-        (key, value),
-    )
-    conn.commit()
-    conn.close()
+def _decode_body(body: bytes, encoding: str) -> bytes:
+    encoding = encoding.strip().lower()
+    if encoding in ("gzip", "x-gzip"):
+        wbits_options = (16 + zlib.MAX_WBITS,)
+    elif encoding == "deflate":
+        wbits_options = (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    else:
+        return body
+    for wbits in wbits_options:
+        try:
+            return zlib.decompressobj(wbits).decompress(body, MAX_RESPONSE_BYTES * 4)
+        except zlib.error:
+            continue
+    raise requests.RequestException("could not decode compressed response")
 
 
 def rss_url(domain: str) -> str:
@@ -258,7 +266,7 @@ def _http_get(
         candidates = ["https://" + url[7:]]
     for candidate in candidates:
         try:
-            resp = requests.get(candidate, headers=hdrs, timeout=timeout)
+            resp = bounded_request(requests.get, candidate, headers=hdrs, timeout=timeout)
             if resp.status_code == 200 and resp.content:
                 return resp
         except Exception:
@@ -454,7 +462,8 @@ def _duckduckgo_news_entries(
         "Accept-Language": "en-US,en;q=0.9",
     }
     try:
-        resp = requests.post(
+        resp = bounded_request(
+            requests.post,
             "https://lite.duckduckgo.com/lite/",
             data={"q": query},
             headers=headers,
@@ -557,7 +566,8 @@ def _valid_translation(source: str, translated: str | None) -> bool:
 
 
 def _google_translate(text: str) -> str:
-    response = requests.get(
+    response = bounded_request(
+        requests.get,
         "https://clients5.google.com/translate_a/t",
         params={
             "client": "dict-chrome-ex",
@@ -574,7 +584,8 @@ def _google_translate(text: str) -> str:
 
 
 def _google_mobile_translate(text: str) -> str:
-    response = requests.get(
+    response = bounded_request(
+        requests.get,
         "https://translate.google.com/m",
         params={"sl": "en", "tl": "zh-CN", "q": text},
         headers={"User-Agent": MOBILE_UA},
@@ -587,7 +598,8 @@ def _google_mobile_translate(text: str) -> str:
 
 
 def _mymemory_translate(text: str) -> str:
-    response = requests.get(
+    response = bounded_request(
+        requests.get,
         "https://api.mymemory.translated.net/get",
         params={"q": text, "langpair": "en|zh-CN"},
         headers={"User-Agent": DESKTOP_UA},
@@ -675,9 +687,14 @@ def add_translations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 return ""
             return translate_title(title)
 
-        with ThreadPoolExecutor(max_workers=min(len(missing), TRANSLATION_WORKERS)) as pool:
-            values = pool.map(translate_before_deadline, missing)
-        fresh = {title: value for title, value in zip(missing, values) if value}
+        results = run_with_deadline(
+            [lambda t=title: translate_before_deadline(t) for title in missing],
+            workers=TRANSLATION_WORKERS,
+            deadline=deadline + STRAGGLER_GRACE_SECONDS,
+        )
+        fresh = {
+            title: value for title, value in zip(missing, results) if isinstance(value, str) and value
+        }
         save_translations(fresh)
         translations.update(fresh)
 
@@ -787,29 +804,45 @@ def fetch_china_stories(
     return add_translations(rows) if translate else rows
 
 
+def run_with_deadline(
+    tasks: list[Callable[[], Any]], *, workers: int, deadline: float
+) -> list[Any]:
+    """Run tasks in parallel; a task that fails or misses the deadline yields None.
+
+    The pool is not joined, so one stuck request cannot keep a refresh (and
+    the refresh lock) busy after the deadline.
+    """
+    if not tasks:
+        return []
+    pool = ThreadPoolExecutor(max_workers=min(len(tasks), workers))
+    try:
+        futures = [pool.submit(task) for task in tasks]
+        wait(futures, timeout=max(0.0, deadline - time.monotonic()))
+        results: list[Any] = []
+        for fut in futures:
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                results.append(fut.result())
+            else:
+                results.append(None)
+        return results
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def fetch_all_stories(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not items:
         return []
     deadline = time.monotonic() + FETCH_BATCH_BUDGET_SECONDS
-    if len(items) == 1:
-        return fetch_china_stories(items[0], deadline=deadline)
-    rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(len(items), 8)) as pool:
-        futures = {
-            pool.submit(
-                fetch_china_stories,
-                item,
-                translate=False,
-                deadline=deadline,
-            ): item
+    results = run_with_deadline(
+        [
+            lambda item=item: fetch_china_stories(item, translate=False, deadline=deadline)
             for item in items
-        }
-        for fut in as_completed(futures):
-            try:
-                rows.extend(fut.result())
-            except Exception:
-                # One blocked publisher must not discard successful outlets.
-                continue
+        ],
+        workers=8,
+        deadline=deadline + STRAGGLER_GRACE_SECONDS,
+    )
+    # One blocked publisher must not discard successful outlets.
+    rows = [row for result in results if result for row in result]
     return add_translations(rows)
 
 
@@ -929,76 +962,6 @@ def export_csv(run_at: str) -> None:
             )
 
 
-SNAPSHOT_FIELDS = ("country", "media_name", "media_url", "domain", "title", "title_zh", "link")
-
-
-def build_snapshot() -> dict[str, Any]:
-    """Fetch every catalog outlet; used by the daily GitHub Actions job."""
-    catalog = load_catalog()
-    rows = fetch_all_stories(catalog)
-    return {
-        "version": 1,
-        "run_at": utc_now_iso(),
-        "count": len(rows),
-        "headlines": [{k: r.get(k, "") for k in SNAPSHOT_FIELDS} for r in rows],
-    }
-
-
-def import_snapshot(snapshot: dict[str, Any]) -> bool:
-    """Store a snapshot as the latest run if it is newer than local data."""
-    snap_at = parse_run_at(snapshot.get("run_at"))
-    headlines = snapshot.get("headlines")
-    if snap_at is None or not isinstance(headlines, list) or not headlines:
-        return False
-    local_at = parse_run_at(latest_run_at())
-    if local_at is not None and local_at >= snap_at:
-        return False
-    rows = [
-        {k: str(h.get(k) or "") for k in SNAPSHOT_FIELDS}
-        for h in headlines
-        if isinstance(h, dict) and h.get("title") and h.get("domain")
-    ]
-    if not rows:
-        return False
-    save_run(rows, run_at=snap_at.isoformat(timespec="seconds"))
-    return True
-
-
-def snapshot_url() -> str:
-    return os.getenv("SNAPSHOT_URL", DEFAULT_SNAPSHOT_URL).strip()
-
-
-def sync_snapshot(*, force: bool = False) -> bool:
-    """Import the published daily snapshot, at most once per check interval."""
-    global _last_snapshot_check
-    url = snapshot_url()
-    if not url:
-        return False
-    if not snapshot_lock.acquire(blocking=False):
-        return False
-    try:
-        now = time.monotonic()
-        if not force and _last_snapshot_check and (
-            now - _last_snapshot_check < SNAPSHOT_CHECK_INTERVAL_SECONDS
-        ):
-            return False
-        _last_snapshot_check = now
-        try:
-            resp = requests.get(
-                url,
-                params={"t": int(time.time())},
-                timeout=SNAPSHOT_TIMEOUT_SECONDS,
-                headers={"Cache-Control": "no-cache"},
-            )
-            resp.raise_for_status()
-            return import_snapshot(resp.json())
-        except Exception:
-            app.logger.warning("Daily snapshot sync failed", exc_info=True)
-            return False
-    finally:
-        snapshot_lock.release()
-
-
 def catalog_by_key(catalog: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(i["key"]): i for i in catalog}
 
@@ -1036,40 +999,6 @@ def picked_keys(catalog: list[dict[str, Any]]) -> list[str]:
     return all_catalog_keys(catalog)
 
 
-def last_scheduled_keys(catalog: list[dict[str, Any]]) -> list[str]:
-    raw = setting_get(SETTINGS_LAST_KEYS)
-    if not raw:
-        return []
-    allowed = set(catalog_by_key(catalog))
-    return [k for k in raw.splitlines() if k in allowed][:MAX_PICK]
-
-
-def keys_for_auto_fetch(catalog: list[dict[str, Any]]) -> list[str]:
-    """Last saved media keys, or all catalog outlets on first run."""
-    keys = last_scheduled_keys(catalog)
-    if keys:
-        if frozenset(keys) == LEGACY_DEFAULT_KEYS:
-            keys = all_catalog_keys(catalog)
-            save_last_keys(keys)
-        return keys
-    return all_catalog_keys(catalog)
-
-
-def save_last_keys(keys: list[str]) -> None:
-    setting_set(SETTINGS_LAST_KEYS, "\n".join(keys[:MAX_PICK]))
-
-
-def daily_run_time() -> tuple[int, int]:
-    hour = int(os.getenv("DAILY_RUN_UTC_HOUR", DEFAULT_DAILY_RUN_HOUR))
-    minute = int(os.getenv("DAILY_RUN_UTC_MINUTE", DEFAULT_DAILY_RUN_MINUTE))
-    return hour, minute
-
-
-def schedule_time_label() -> str:
-    hour, minute = daily_run_time()
-    return f"{hour:02d}:{minute:02d} GMT"
-
-
 @app.route("/health")
 @app.route("/version")
 def health():
@@ -1079,7 +1008,7 @@ def health():
         "commit": os.getenv("RENDER_GIT_COMMIT", "local"),
         "cloud": IS_CLOUD_HOST,
         "refresh_running": fetch_lock.locked(),
-        "daily_run_utc": schedule_time_label(),
+        "refresh": refresh_status(),
         "last_run": latest_run_at(),
         "sources": ["google-rss", "native-rss", "bing-rss", "bing", "duckduckgo"],
     }
@@ -1118,7 +1047,6 @@ def _probe_fetch(domain: str) -> dict[str, Any]:
 
 @app.route("/")
 def home():
-    sync_snapshot()
     catalog = load_catalog()
     by_key = catalog_by_key(catalog)
     active = picked_keys(catalog)
@@ -1136,9 +1064,8 @@ def home():
         rows=rows,
         grouped=grouped,
         last_run=format_run_at(last_run),
-        schedule=schedule_time_label(),
-        update_deadline=UPDATE_DEADLINE_LABEL,
-        last_scheduled=last_scheduled_keys(catalog),
+        refresh=refresh_status(),
+        refresh_poll_seconds=REFRESH_POLL_SECONDS,
         keywords=KEYWORDS_LABEL,
         time_window=TIME_WINDOW_LABEL,
     )
@@ -1154,7 +1081,6 @@ def pick():
             flash("请至少选择一家媒体。", "error")
             return redirect(url_for("pick"))
         session[SESSION_KEYS] = keys[:MAX_PICK]
-        save_last_keys(keys[:MAX_PICK])
         flash("已保存选择，返回首页刷新新闻。", "success")
         return redirect(url_for("home"))
     selected = set(picked_keys(catalog))
@@ -1169,28 +1095,55 @@ def pick():
     )
 
 
+def refresh_status() -> dict[str, Any]:
+    return dict(_refresh_status)
+
+
+def _refresh_worker(items: list[dict[str, Any]]) -> None:
+    try:
+        rows = fetch_all_stories(items)
+        if rows:
+            save_run(rows)
+            message = f"已从 {len(items)} 家媒体获取过去 24 小时内 {len(rows)} 条相关新闻。"
+            category = "success"
+        else:
+            message = "没有获取到过去 24 小时内的相关新闻，已保留上一次结果。"
+            category = "error"
+    except Exception:
+        app.logger.exception("News refresh failed")
+        message = "刷新暂时失败，已保留上一次结果，请稍后重试。"
+        category = "error"
+    _refresh_status.update(
+        running=False, finished_at=utc_now_iso(), message=message, category=category
+    )
+    fetch_lock.release()
+
+
+def start_refresh(items: list[dict[str, Any]]) -> bool:
+    """Start a refresh in the background; False when one is already running."""
+    if not fetch_lock.acquire(blocking=False):
+        return False
+    _refresh_status.clear()
+    _refresh_status.update(running=True, started_at=utc_now_iso(), media_count=len(items))
+    try:
+        Thread(target=_refresh_worker, args=(items,), daemon=True).start()
+    except Exception:
+        _refresh_status.update(running=False)
+        fetch_lock.release()
+        raise
+    return True
+
+
 @app.route("/fetch", methods=["POST"])
 def fetch_now():
     catalog = load_catalog()
     by_key = catalog_by_key(catalog)
-    keys = [k for k in picked_keys(catalog) if k in by_key]
-    items = [by_key[k] for k in keys]
-    if not fetch_lock.acquire(blocking=False):
+    items = [by_key[k] for k in picked_keys(catalog) if k in by_key]
+    if not items:
+        flash("请至少选择一家媒体。", "error")
+        return redirect(url_for("pick"))
+    if not start_refresh(items):
         flash("新闻正在刷新，请耐心等待。", "success")
-        return redirect(url_for("home"))
-    try:
-        rows = fetch_all_stories(items)
-        save_run(rows)
-        save_last_keys(keys)
-        flash(
-            f"已从 {len(keys)} 家媒体获取过去 24 小时内 {len(rows)} 条相关新闻。",
-            "success",
-        )
-    except Exception:
-        app.logger.exception("Manual news refresh failed")
-        flash("刷新暂时失败，已保留上一次结果，请稍后重试。", "error")
-    finally:
-        fetch_lock.release()
     return redirect(url_for("home"))
 
 
@@ -1201,117 +1154,8 @@ def clear_pick():
     return redirect(url_for("pick"))
 
 
-def run_auto_fetch(*, persist_keys: bool = False) -> int:
-    """Fetch headlines for saved (or default) media. Returns story count."""
-    if not fetch_lock.acquire(blocking=False):
-        return 0
-    try:
-        catalog = load_catalog()
-        by_key = catalog_by_key(catalog)
-        keys = keys_for_auto_fetch(catalog)
-        if not keys:
-            return 0
-        rows = fetch_all_stories([by_key[k] for k in keys])
-        save_run(rows)
-        if persist_keys:
-            save_last_keys(keys)
-        return len(rows)
-    finally:
-        fetch_lock.release()
-
-
-def startup_fetch_enabled() -> bool:
-    # A refresh inside the Render web process can hold the manual-refresh lock
-    # for the lifetime of a bad background task. Cloud instances must become
-    # immediately usable; daily and manual refreshes remain available.
-    if IS_CLOUD_HOST:
-        return False
-    return os.getenv("STARTUP_FETCH", "1").strip().lower() not in ("0", "false", "no")
-
-
-def try_acquire_startup_fetch_lock(
-    *, cooldown_seconds: int = STARTUP_FETCH_COOLDOWN_SECONDS
-) -> bool:
-    """Let only one worker run startup fetch (gunicorn may spawn several)."""
-    now = dt.datetime.now(dt.timezone.utc)
-    conn = get_conn()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT value FROM settings WHERE key = ?", (SETTINGS_STARTUP_LOCK,)
-        ).fetchone()
-        if row:
-            try:
-                last = dt.datetime.fromisoformat(str(row["value"]))
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=dt.timezone.utc)
-                if (now - last).total_seconds() < cooldown_seconds:
-                    conn.execute("ROLLBACK")
-                    return False
-            except ValueError:
-                pass
-        conn.execute(
-            """
-            INSERT INTO settings (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (SETTINGS_STARTUP_LOCK, now.isoformat(timespec="seconds")),
-        )
-        conn.commit()
-        return True
-    except Exception:
-        conn.rollback()
-        return False
-    finally:
-        conn.close()
-
-
-def _startup_fetch_worker() -> None:
-    try:
-        run_auto_fetch(persist_keys=True)
-    except Exception:
-        pass
-
-
-def schedule_startup_fetch() -> None:
-    if not startup_fetch_enabled() or not try_acquire_startup_fetch_lock():
-        return
-    Thread(target=_startup_fetch_worker, daemon=True).start()
-
-
-def scheduled_job() -> None:
-    run_auto_fetch()
-
-
-def start_scheduler() -> None:
-    if scheduler.running:
-        return
-    hour, minute = daily_run_time()
-    scheduler.add_job(
-        scheduled_job,
-        "cron",
-        id="daily_fetch",
-        hour=hour,
-        minute=minute,
-        timezone=dt.timezone.utc,
-        misfire_grace_time=3600,
-        coalesce=True,
-        replace_existing=True,
-    )
-    scheduler.start()
-
-
-def boot() -> None:
-    init_db()
-    start_scheduler()
-    Thread(target=sync_snapshot, kwargs={"force": True}, daemon=True).start()
-    schedule_startup_fetch()
-
-
 if __name__ == "__main__":
-    boot()
+    init_db()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
-
-
-if __name__ != "__main__":
-    boot()
+else:
+    init_db()

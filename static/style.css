@@ -306,6 +306,7 @@ h1 {
 }
 
 .btn:active { transform: scale(0.98); }
+.btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
 
 .btn-primary {
   background: linear-gradient(135deg, var(--accent2), #0284c7);

@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
+{% block head %}
+{% if refresh.running %}<meta http-equiv="refresh" content="{{ refresh_poll_seconds }}">{% endif %}
+{% endblock %}
 {% block body %}
 <section class="hero">
   <span class="badge">{{ time_window }} · {{ keywords }}</span>
@@ -15,11 +18,18 @@
 
 <div class="card">
   <h2>刷新</h2>
-  <p class="meta">每天 GMT {{ update_deadline }} 前自动更新全部媒体（{{ schedule }} 开始获取）；也可随时手动获取。</p>
+  <p class="meta">点「获取新闻」即可获取所选媒体的最新新闻，通常需要约 1 分钟。</p>
+  {% if refresh.running %}
+  <div class="flash success">正在获取 {{ refresh.media_count }} 家媒体的新闻，请稍候，页面会自动刷新…</div>
+  {% elif refresh.message %}
+  <div class="flash {{ refresh.category }}">{{ refresh.message }}</div>
+  {% endif %}
   <div class="btn-row">
     <a class="btn btn-ghost" href="{{ url_for('pick') }}">选择媒体</a>
     <form method="post" action="{{ url_for('fetch_now') }}" style="flex:1">
-      <button type="submit" class="btn btn-primary btn-block">获取新闻</button>
+      <button type="submit" class="btn btn-primary btn-block" {% if refresh.running %}disabled{% endif %}>
+        {% if refresh.running %}正在获取…{% else %}获取新闻{% endif %}
+      </button>
     </form>
   </div>
 </div>
@@ -67,7 +77,7 @@
     </div>
     {% endfor %}
   {% else %}
-  <div class="empty">暂无过去 24 小时内的结果。请选择媒体后点「获取新闻」。</div>
+  <div class="empty">暂无结果。请点「获取新闻」获取过去 24 小时内的相关新闻。</div>
   {% endif %}
 </div>
 {% endblock %}

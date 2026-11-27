@@ -2,6 +2,7 @@
 """Test China-related news search: RSS fetch + web flow."""
 import re
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -13,6 +14,7 @@ from app import (  # noqa: E402
     TIME_WINDOW_HOURS,
     app,
     fetch_china_stories,
+    fetch_lock,
     is_china_related,
     load_catalog,
     rss_url,
@@ -62,7 +64,11 @@ def test_web_fetch_flow() -> None:
     client.post("/pick", data={"media": ALL_KEYS})
     r = client.post("/fetch", follow_redirects=True)
     assert r.status_code == 200, f"fetch failed: {r.status_code}"
-    html = r.get_data(as_text=True)
+    deadline = time.monotonic() + 150
+    while fetch_lock.locked() and time.monotonic() < deadline:
+        time.sleep(1)
+    assert not fetch_lock.locked(), "refresh did not finish"
+    html = client.get("/").get_data(as_text=True)
     assert "\u76f8\u5173\u65b0\u95fb" in html or "\u5df2\u83b7\u53d6" in html
     # At least one headline link and keyword in page
     assert "headline" in html
